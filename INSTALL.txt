@@ -1,0 +1,38 @@
+Liquid Sandbox 1.0.0 for Combustor (work in progress)
+
+This is an early, unfinished mod: expect rough edges and changes.
+
+Adds a Liquid Sandbox entry to the main menu, directly below Sandbox. It uses the same grid,
+walls, camera and building tools, with water in place of gas. Regular Sandbox is unchanged.
+
+Needs
+  Combustor on Steam (Windows), with MelonLoader 0.7.x installed for it.
+  Tested with Combustor Steam build 26701522 (Unity 6000.3.2f1) and MelonLoader 0.7.3.
+
+Install
+  1. Close Combustor.
+  2. In Steam, right-click Combustor and choose Manage > Browse local files.
+  3. Extract this ZIP into that folder (the one containing EngineSimulator.exe).
+     Merge the Mods folder if asked. The result should be:
+       Mods\LiquidSandbox.dll
+  4. Start Combustor. The main menu shows Liquid Sandbox under Sandbox.
+
+Play
+  A (Water tool)  pour water. The mouse wheel sets how fast.
+  S (Drain tool)  drain water.
+  W               draw walls; right-click erases. Valves (B) work too.
+  F               turn gravity clockwise (with the Wall, Water or Drain tool).
+  AMBIENT panel   Gravity: the four arrows set the direction, like the wind control.
+                  The strength slider runs from 0 g to 2 g; Zero g and 1 g set those directly.
+                  "Drain all water" empties the grid.
+  Hover a cell to see its water level, depth and the total water in the grid.
+  Esc > Save keeps the water too, in a "<name>.engine.water" file next to the save.
+
+Remove
+  Close the game and delete Mods\LiquidSandbox.dll. Saved .engine.water files can stay or go.
+
+Problems
+  Read MelonLoader\Latest.log. A working start logs:
+    Liquid Sandbox ready: it is on the main menu under Sandbox.
+  If a game update changes the parts the mod hooks into, it logs that and turns itself off,
+  leaving the rest of the game as it was.

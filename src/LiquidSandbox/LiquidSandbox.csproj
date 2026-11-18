@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Builds Mods\LiquidSandbox.dll for Combustor (Steam, Windows x64, IL2CPP) with MelonLoader 0.7.x.
+    References come from the game folder: MelonLoader\net6 and the bindings MelonLoader generates in
+    MelonLoader\Il2CppAssemblies on the first launch. Pass -p:GameDirectory="..." for another install path.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>LiquidSandbox</AssemblyName>
+    <RootNamespace>LiquidSandbox</RootNamespace>
+    <Version>1.0.0</Version>
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DebugType>none</DebugType>
+    <GameDirectory Condition="'$(GameDirectory)' == ''">C:\Program Files (x86)\Steam\steamapps\common\EngineSimulator</GameDirectory>
+    <MelonDir>$(GameDirectory)\MelonLoader\net6</MelonDir>
+    <BindingsDir>$(GameDirectory)\MelonLoader\Il2CppAssemblies</BindingsDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="0Harmony" HintPath="$(MelonDir)\0Harmony.dll" Private="false" />
+    <Reference Include="MelonLoader" HintPath="$(MelonDir)\MelonLoader.dll" Private="false" />
+    <Reference Include="Il2CppInterop.Runtime" HintPath="$(MelonDir)\Il2CppInterop.Runtime.dll" Private="false" />
+    <Reference Include="Il2CppInterop.Common" HintPath="$(MelonDir)\Il2CppInterop.Common.dll" Private="false" />
+    <Reference Include="Assembly-CSharp" HintPath="$(BindingsDir)\Assembly-CSharp.dll" Private="false" />
+    <Reference Include="Il2Cppmscorlib" HintPath="$(BindingsDir)\Il2Cppmscorlib.dll" Private="false" />
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(BindingsDir)\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine.IMGUIModule" HintPath="$(BindingsDir)\UnityEngine.IMGUIModule.dll" Private="false" />
+  </ItemGroup>
+  <Target Name="CheckGameDirectory" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(BindingsDir)\Assembly-CSharp.dll')" Text="Game bindings not found in $(BindingsDir). Install MelonLoader, start Combustor once so it generates them, or pass -p:GameDirectory=&quot;C:\path\to\EngineSimulator&quot;." />
+  </Target>
+</Project>
