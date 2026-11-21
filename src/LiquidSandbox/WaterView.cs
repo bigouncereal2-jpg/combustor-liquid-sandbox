@@ -13,9 +13,11 @@ namespace LiquidSandbox;
 /// water level inside each cell at any zoom.</summary>
 internal sealed unsafe class WaterView
 {
-    static readonly Color32 Shallow = new(78, 168, 245, 255);
-    static readonly Color32 DeepWater = new(24, 76, 186, 255);
+    // Light (surface / falling) and deep colours per liquid: water, gasoline, diesel.
+    static readonly Color32[] Light = { default, new(78, 168, 245, 255), new(250, 214, 96, 255), new(204, 146, 62, 255) };
+    static readonly Color32[] Deep = { default, new(24, 76, 186, 255), new(196, 136, 28, 255), new(104, 64, 20, 255) };
     const int DepthSteps = 16;
+    const float HazeStrength = 0.25f;
     const MeshUpdateFlags Quiet = MeshUpdateFlags.DontValidateIndices | MeshUpdateFlags.DontResetBoneBounds
         | MeshUpdateFlags.DontNotifyMeshUsers | MeshUpdateFlags.DontRecalculateBounds;
 
@@ -26,7 +28,7 @@ internal sealed unsafe class WaterView
         public uint Color;
     }
 
-    readonly Color32[] _depthColors = new Color32[DepthSteps + 1];
+    readonly Color32[,] _depthColors = new Color32[LiquidGrid.KindCount + 1, DepthSteps + 1];
     Vertex[] _vertices = new Vertex[4 * 512];
     int[] _indices = Array.Empty<int>();
     int _quadCapacity;
@@ -41,7 +43,8 @@ internal sealed unsafe class WaterView
 
     public WaterView()
     {
-        for (int d = 0; d <= DepthSteps; d++) _depthColors[d] = Color32.Lerp(Shallow, DeepWater, (float)d / DepthSteps);
+        for (int k = 1; k <= LiquidGrid.KindCount; k++)
+            for (int d = 0; d <= DepthSteps; d++) _depthColors[k, d] = Color32.Lerp(Light[k], Deep[k], (float)d / DepthSteps);
     }
 
     public void Draw(GasSimRenderer renderer, LiquidGrid water, ReadOnlySpan<byte> solid, Span<Color32> pixels)
@@ -80,16 +83,35 @@ internal sealed unsafe class WaterView
                     depth = 0;
                     continue;
                 }
-                int amount = cells[(y + 1) * stride + x + 1];
+                int i = (y + 1) * stride + x + 1;
+                int amount = cells[i];
                 if (amount <= 0)
                 {
                     depth = 0;
+                    Haze(water, i, ref pixels[k]);
                     continue;
                 }
-                if (amount >= LiquidGrid.Full) pixels[k] = level ? _depthColors[Math.Min(depth, DepthSteps)] : Shallow;
-                depth++;
+                int kind = water.Kind[i];
+                if (amount >= LiquidGrid.Full)
+                    pixels[k] = level && water.Rests(i) ? _depthColors[kind, Math.Min(depth, DepthSteps)] : Light[kind];
+                depth = water.Rests(i) ? depth + 1 : 0;
             }
         }
+    }
+
+    /// <summary>Vapour shows as a faint haze of its liquid's colour, by how saturated the air is.</summary>
+    static void Haze(LiquidGrid water, int i, ref Color32 pixel)
+    {
+        float best = 0f;
+        int kind = 0;
+        for (int k = 1; k <= LiquidGrid.KindCount; k++)
+        {
+            int v = water.Vapor[k][i];
+            if (v == 0) continue;
+            float share = Math.Min(1f, (float)v / LiquidGrid.Saturation[k]);
+            if (share > best) { best = share; kind = k; }
+        }
+        if (kind != 0) pixel = Color32.Lerp(pixel, Light[kind], best * HazeStrength);
     }
 
     bool Ensure(GasSimRenderer renderer, LiquidGrid water)
@@ -152,19 +174,25 @@ internal sealed unsafe class WaterView
         bool level = water.Strength > 0f;
         GridDir dir = water.Gravity;
         float size = _cellSize, ox = -_pivot.x * size, oy = -_pivot.y * size;
-        uint surface = Pack(Shallow, 255);
         int quads = 0;
         for (int y = 0; y < h; y++)
         {
             int row = (y + 1) * stride + 1, srow = y * w;
             for (int x = 0; x < w; x++)
             {
-                int amount = cells[row + x];
+                int i = row + x;
+                int amount = cells[i];
                 if (amount <= 0 || amount >= LiquidGrid.Full || solid[srow + x] != 0) continue;
                 float f = (float)amount / LiquidGrid.Full;
                 float x0 = ox + x * size, y0 = oy + y * size, x1 = x0 + size, y1 = y0 + size;
-                uint color = surface;
-                if (level)
+                Color32 tint = Light[water.Kind[i]];
+                uint color = Pack(tint, 255);
+                if (!level)
+                {
+                    // No gravity, no surface: show how full the cell is as how strongly it is tinted.
+                    color = Pack(tint, (byte)Math.Clamp((int)(f * 255f + 0.5f), 24, 255));
+                }
+                else if (water.Rests(i))
                 {
                     switch (dir)
                     {
@@ -176,8 +204,19 @@ internal sealed unsafe class WaterView
                 }
                 else
                 {
-                    // No gravity, no surface: show how full the cell is as how strongly it is tinted.
-                    color = Pack(Shallow, (byte)Math.Clamp((int)(f * 255f + 0.5f), 24, 255));
+                    // Falling: a stream as wide as the cell is full, running along gravity.
+                    if (f >= 0.25f)
+                    {
+                        float inset = (1f - f) * 0.5f * size;
+                        if (dir is GridDir.Down or GridDir.Up) { x0 += inset; x1 -= inset; }
+                        else { y0 += inset; y1 -= inset; }
+                    }
+                    else
+                    {
+                        // A little falling liquid is a droplet with the same area, not a hairline.
+                        float inset = (1f - MathF.Sqrt(f)) * 0.5f * size;
+                        x0 += inset; x1 -= inset; y0 += inset; y1 -= inset;
+                    }
                 }
                 if ((quads + 1) * 4 > _vertices.Length) Array.Resize(ref _vertices, _vertices.Length * 2);
                 int v = quads * 4;

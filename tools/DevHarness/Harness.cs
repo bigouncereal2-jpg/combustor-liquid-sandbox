@@ -141,7 +141,7 @@ public sealed class Harness : MelonMod
         {
             var s = LiquidSession.Current;
             Check(s != null && s.Sim.settings.vacuumAmbient && !s.Sim.settings.openBoundaries, "no gas, sealed edges");
-            Check(L.Data("Gas") == "Water" && L.Data("Vacuum") == "Drain", "gas tools shown as Water and Drain");
+            Check(L.Data("Gas") == "Liquid" && L.Data("Vacuum") == "Drain", "gas tools shown as Liquid and Drain");
             Check(!s.Input.ToolAllowed(Tool.Heat) && s.Input.ToolAllowed(Tool.Gas) && s.Input.ToolAllowed(Tool.Wall), "tool set limited to walls, water, drain, valve");
             MoveTo(Screen.width - 20, Screen.height / 2);
             Shot("04_liquid_empty");
@@ -197,6 +197,11 @@ public sealed class Harness : MelonMod
         {
             var s = LiquidSession.Current;
             for (int k = 0; k < 400; k++) s.Input.StampOne(46 + k % 6, 125, false);
+            s.SelectedKind = LiquidGrid.Gasoline;
+            for (int k = 0; k < 150; k++) s.Input.StampOne(60, 125, false);
+            s.SelectedKind = LiquidGrid.Diesel;
+            for (int k = 0; k < 150; k++) s.Input.StampOne(70, 125, false);
+            s.SelectedKind = LiquidGrid.Water1;
             s.Input.SelectTool(Tool.Wall);
             _expectedWater = s.Water.Total();
             _watchWater = true;

@@ -12,57 +12,75 @@ public enum GridDir
 }
 
 /// <summary>
-/// Water on Combustor's cell grid. Every cell stores an integer amount of water, where
-/// <see cref="Full"/> is one completely filled cell. All movement is done as integer
-/// transfers from one cell to another, so the total can only change through
-/// <see cref="Add"/>, <see cref="Remove"/> and <see cref="Clear"/>.
+/// Liquids on Combustor's cell grid. Every cell holds an integer amount of one liquid (or none),
+/// where <see cref="Full"/> is one completely filled cell, plus vapour of each liquid in empty cells.
+/// All movement is done as integer transfers, so for every liquid the sum of its liquid, its vapour
+/// and its overflow can only change through <see cref="Add"/>, <see cref="Remove"/> and <see cref="Clear"/>.
 ///
 /// Each fixed tick runs, in order:
-///  1. falling: water drops into the neighbouring cell along gravity while it has room;
-///  2. spreading: water resting on something flows sideways (perpendicular to gravity),
-///     driven by the difference in the height of the water columns, with some momentum;
-///  3. pressure: water in a connected body of full cells moves from its highest surface
-///     to its lowest opening, so connected vessels reach one level.
-/// With zero gravity only an even exchange between neighbouring cells runs.
-///
+///  1. falling: liquid drops along gravity while there is room; a denser liquid trades places with a
+///     lighter one below it, so fuels float on water;
+///  2. spreading: liquid resting on something flows sideways towards lower pressure, with momentum;
+///     falling liquid keeps its sideways speed, so water leaving a hole flies as a jet;
+///  3. pressure: a connected body of full cells moves liquid from its highest surface to its lowest
+///     openings, which levels connected vessels and makes deep openings spout fast;
+///  4. evaporation: exposed surfaces evaporate into the empty cell above until that air is saturated;
+///     vapour spreads through empty cells.
+/// With zero gravity, neighbouring cells of the same liquid exchange until they are even.
 /// The arrays are padded with a one-cell solid border so neighbours never need bounds checks.
 /// </summary>
 public sealed unsafe class LiquidGrid
 {
     public const int Full = 1 << 16;
     public const float MaxStrength = 2f;
+    public const int KindCount = 3;
+    public const byte Water1 = 1, Gasoline = 2, Diesel = 3;
 
-    const float FallPassesPerG = 2f;      // cells a free-falling body drops per tick at 1 g
+    public static readonly string[] Names = { "", "Water", "Gasoline", "Diesel" };
+    /// <summary>Density relative to water.</summary>
+    public static readonly float[] Density = { 1f, 1f, 0.74f, 0.84f };
+    /// <summary>How readily each liquid flows sideways (water = 1).</summary>
+    static readonly float[] Fluidity = { 1f, 1f, 1.25f, 0.55f };
+    /// <summary>Units per tick an exposed cell evaporates into dry air at 1 g.</summary>
+    static readonly float[] EvaporationRate = { 0f, 1.2f, 26f, 0.6f };
+    /// <summary>Vapour one empty cell holds before evaporation into it stops.</summary>
+    public static readonly int[] Saturation = { 1, Full / 200, Full / 40, Full / 400 };
+
+    const float FallPassesPerG = 2f;
     const int MaxFallPasses = 8;
-    const float SpreadGain = 0.2f;        // sideways flow per tick per cell of head difference, at 1 g
-    const float SpreadMomentum = 0.9f;    // share of last tick's sideways flow that carries over
-    const int FilmMin = Full / 8;         // a resting cell needs this much water to wet a dry neighbour
-    const float PressureRate = 0.5f;      // share of a body's imbalance moved per tick, at 1 g
-    const float PressureDeadBand = 0.2f;  // level differences below this are left to sideways flow
-    const int PressureMinChunk = Full / 16; // smallest pressure transfer, so openings fill completely
-    const int Brim = Full - Full / 256;   // a cell this full joins a body of water for pressure
-    const float ZeroGExchange = 0.2f;     // share of the difference two neighbours exchange per pass
+    const float SpreadGain = 0.2f;
+    const float SpreadMomentum = 0.9f;
+    const int FilmMin = Full / 8;
+    const float PressureRate = 0.5f;
+    const float PressureDeadBand = 0.2f;
+    const int PressureMinChunk = Full / 16;
+    const int Brim = Full - Full / 256;
+    const float JetGain = 0.25f;          // exit speed (cells per tick) per sqrt(cell of head * g)
+    const float MaxJet = 1f;
+    const float AirDrag = 0.97f;          // sideways speed kept per tick while falling
+    const float ExchangeShare = 0.2f;
     const int ZeroGPasses = 3;
 
     public int Width { get; }
     public int Height { get; }
-    /// <summary>Padded row length (Width + 2).</summary>
     public int Stride { get; }
-    /// <summary>Padded cell count.</summary>
     public int Length { get; }
 
-    /// <summary>Water per padded cell, 0..Full. Always 0 in solid cells.</summary>
+    /// <summary>Liquid per padded cell, 0..Full. Always 0 in solid cells.</summary>
     public readonly int[] Water;
+    /// <summary>Which liquid a padded cell holds (0 when empty).</summary>
+    public readonly byte[] Kind;
     /// <summary>1 where a padded cell is a wall (including the border).</summary>
     public readonly byte[] Solid;
-
-    /// <summary>Water that could not be placed because there was no room anywhere.</summary>
-    public long Overflow { get; private set; }
+    /// <summary>Vapour per liquid kind (index 1..3), held in empty cells.</summary>
+    public readonly int[][] Vapor;
+    /// <summary>Liquid per kind that could not be placed because there was no room.</summary>
+    public readonly long[] Overflow = new long[KindCount + 1];
 
     public GridDir Gravity { get; set; } = GridDir.Down;
+    public bool Evaporation { get; set; } = true;
 
     float _strength = 1f;
-    /// <summary>Gravity strength in g, 0..MaxStrength. 0 means no preferred direction.</summary>
     public float Strength
     {
         get => _strength;
@@ -71,20 +89,14 @@ public sealed unsafe class LiquidGrid
 
     public long Ticks { get; private set; }
 
-    readonly float[] _qx;    // sideways flow carried between ticks, face (i, i+1)
-    readonly float[] _qy;    // face (i, i+Stride)
-    readonly float[] _head;
-    readonly byte[] _rest;   // 1 where the cell's water is held up by a wall or a resting full cell
-    readonly float[] _cellA;
-    readonly float[] _cellB;
-    readonly int[] _prev;
-    readonly int[] _stack;
-    readonly int[] _queue;
-    readonly int[] _mark;
+    readonly float[] _qx, _qy, _head, _vel, _cellA, _cellB;
+    readonly byte[] _rest;
+    readonly int[] _prev, _stack, _queue, _mark;
     int _markValue;
-    readonly int[] _srcCell, _srcAvail, _snkCell, _snkRoom;
+    readonly int[] _srcCell, _srcAvail, _snkCell, _snkRoom, _snkSide;
     readonly float[] _srcLevel, _snkLevel;
     readonly long[] _give;
+    readonly bool[] _vaporPresent = new bool[KindCount + 1];
     float _fallBudget;
     int _axis = -1;
 
@@ -96,13 +108,17 @@ public sealed unsafe class LiquidGrid
         Stride = width + 2;
         Length = Stride * (height + 2);
         Water = new int[Length];
+        Kind = new byte[Length];
         Solid = new byte[Length];
+        Vapor = new int[KindCount + 1][];
+        for (int k = 1; k <= KindCount; k++) Vapor[k] = new int[Length];
         _qx = new float[Length];
         _qy = new float[Length];
         _head = new float[Length];
-        _rest = new byte[Length];
+        _vel = new float[Length];
         _cellA = new float[Length];
         _cellB = new float[Length];
+        _rest = new byte[Length];
         _prev = new int[Length];
         _stack = new int[Length];
         _queue = new int[Length];
@@ -111,6 +127,7 @@ public sealed unsafe class LiquidGrid
         _srcAvail = new int[Length];
         _snkCell = new int[Length];
         _snkRoom = new int[Length];
+        _snkSide = new int[Length];
         _srcLevel = new float[Length];
         _snkLevel = new float[Length];
         _give = new long[Length];
@@ -127,29 +144,59 @@ public sealed unsafe class LiquidGrid
     }
 
     public int Index(int x, int y) => (y + 1) * Stride + x + 1;
-
     public bool InBounds(int x, int y) => (uint)x < (uint)Width && (uint)y < (uint)Height;
-
     public int Get(int x, int y) => InBounds(x, y) ? Water[Index(x, y)] : 0;
-
+    public int KindAt(int x, int y) => InBounds(x, y) ? Kind[Index(x, y)] : 0;
+    public int VaporAt(int x, int y, int kind) => InBounds(x, y) ? Vapor[kind][Index(x, y)] : 0;
     public bool IsSolid(int x, int y) => !InBounds(x, y) || Solid[Index(x, y)] != 0;
+    /// <summary>True when the padded cell's liquid is held up rather than falling (as of the last tick).</summary>
+    public bool Rests(int i) => _rest[i] != 0;
 
-    public long Total()
+    /// <summary>All liquid, vapour and overflow of one kind, in units.</summary>
+    public long Total(int kind)
     {
-        long sum = Overflow;
-        int[] w = Water;
-        for (int i = 0; i < w.Length; i++) sum += w[i];
+        long sum = Overflow[kind];
+        int[] w = Water, v = Vapor[kind];
+        byte[] k = Kind;
+        for (int i = 0; i < w.Length; i++)
+        {
+            if (k[i] == kind) sum += w[i];
+            sum += v[i];
+        }
         return sum;
     }
 
-    public int Add(int x, int y, int units)
+    public long Total()
     {
-        if (units <= 0 || !InBounds(x, y)) return 0;
+        long sum = 0;
+        for (int k = 1; k <= KindCount; k++) sum += Total(k);
+        return sum;
+    }
+
+    public long LiquidOf(int kind)
+    {
+        long sum = 0;
+        for (int i = 0; i < Water.Length; i++) if (Kind[i] == kind) sum += Water[i];
+        return sum;
+    }
+
+    public long VaporOf(int kind)
+    {
+        long sum = 0;
+        int[] v = Vapor[kind];
+        for (int i = 0; i < v.Length; i++) sum += v[i];
+        return sum;
+    }
+
+    public int Add(int x, int y, int units, int kind = Water1)
+    {
+        if (units <= 0 || kind < 1 || kind > KindCount || !InBounds(x, y)) return 0;
         int i = Index(x, y);
-        if (Solid[i] != 0) return 0;
+        if (Solid[i] != 0 || (Kind[i] != 0 && Kind[i] != kind)) return 0;
         int t = Math.Min(units, Full - Water[i]);
         if (t <= 0) return 0;
         Water[i] += t;
+        Kind[i] = (byte)kind;
         return t;
     }
 
@@ -159,26 +206,38 @@ public sealed unsafe class LiquidGrid
         int i = Index(x, y);
         int t = Math.Min(units, Water[i]);
         Water[i] -= t;
+        if (Water[i] == 0) Empty(i);
         return t;
+    }
+
+    void Empty(int i)
+    {
+        Kind[i] = 0;
+        _vel[i] = 0f;
     }
 
     public void Clear()
     {
         Array.Clear(Water);
-        Overflow = 0;
+        Array.Clear(Kind);
+        for (int k = 1; k <= KindCount; k++) Array.Clear(Vapor[k]);
+        Array.Clear(Overflow);
+        Array.Clear(_vaporPresent);
+        Array.Clear(_vel);
         ClearMomentum();
     }
 
-    /// <summary>Copies walls from a row-major (y * Width + x) solid map. Water in a cell that
-    /// has become a wall is pushed into the nearest cells with room.</summary>
+    // ---------------------------------------------------------------- walls
+
+    /// <summary>Copies walls from a row-major (y * Width + x) solid map. Liquid and vapour in a cell
+    /// that has become a wall are pushed into the nearest open cells.</summary>
     public void SyncSolid(ReadOnlySpan<byte> solid)
     {
         if (solid.Length < Width * Height) throw new ArgumentException("Solid map is too small.", nameof(solid));
         int displaced = 0;
         for (int y = 0; y < Height; y++)
         {
-            int row = (y + 1) * Stride + 1;
-            int src = y * Width;
+            int row = (y + 1) * Stride + 1, src = y * Width;
             for (int x = 0; x < Width; x++)
             {
                 int i = row + x;
@@ -186,41 +245,46 @@ public sealed unsafe class LiquidGrid
                 {
                     if (Solid[i] != 0) continue;
                     Solid[i] = 1;
-                    int w = Water[i];
-                    if (w == 0) continue;
-                    Water[i] = 0;
-                    _stack[displaced] = i;
-                    _srcAvail[displaced++] = w;
+                    _stack[displaced++] = i;
                 }
-                else if (Solid[i] != 0)
-                {
-                    Solid[i] = 0;
-                }
+                else if (Solid[i] != 0) Solid[i] = 0;
             }
         }
-        for (int k = 0; k < displaced; k++)
+        for (int d = 0; d < displaced; d++)
         {
-            int left = Deposit(_stack[k], _srcAvail[k]);
-            if (left > 0) Overflow += left;
+            int i = _stack[d];
+            int w = Water[i], kind = Kind[i];
+            Water[i] = 0;
+            Empty(i);
+            if (w > 0)
+            {
+                int left = Deposit(i, w, kind);
+                if (left > 0) Overflow[kind] += left;
+            }
+            for (int k = 1; k <= KindCount; k++)
+            {
+                int v = Vapor[k][i];
+                if (v == 0) continue;
+                Vapor[k][i] = 0;
+                int air = NearestAir(i);
+                if (air >= 0) { Vapor[k][air] += v; _vaporPresent[k] = true; }
+                else Overflow[k] += v;
+            }
         }
         PlaceOverflow();
     }
 
-    /// <summary>Puts <paramref name="amount"/> into the open cells nearest to <paramref name="origin"/>
-    /// (the origin first, if it is open), searching through full cells. Returns what did not fit.</summary>
-    int Deposit(int origin, int amount)
+    /// <summary>Puts liquid into the open cells nearest to <paramref name="origin"/> that are empty or hold
+    /// the same liquid (the origin first, if it is open), searching through any open cells.</summary>
+    int Deposit(int origin, int amount, int kind)
     {
         if (amount <= 0) return 0;
         int mark = NextMark();
         int head = 0, tail = 0, stride = Stride;
-        if (Solid[origin] == 0)
-        {
-            _mark[origin] = mark;
-            _queue[tail++] = origin;
-        }
+        _mark[origin] = mark;
+        if (Solid[origin] == 0) _queue[tail++] = origin;
         else
         {
-            _mark[origin] = mark;
             PushOpen(origin + 1, mark, ref tail);
             PushOpen(origin - 1, mark, ref tail);
             PushOpen(origin + stride, mark, ref tail);
@@ -229,13 +293,17 @@ public sealed unsafe class LiquidGrid
         while (head < tail)
         {
             int c = _queue[head++];
-            int room = Full - Water[c];
-            if (room > 0)
+            if (Kind[c] == 0 || Kind[c] == kind)
             {
-                int t = Math.Min(room, amount);
-                Water[c] += t;
-                amount -= t;
-                if (amount == 0) break;
+                int room = Full - Water[c];
+                if (room > 0)
+                {
+                    int t = Math.Min(room, amount);
+                    Water[c] += t;
+                    Kind[c] = (byte)kind;
+                    amount -= t;
+                    if (amount == 0) break;
+                }
             }
             PushOpen(c + 1, mark, ref tail);
             PushOpen(c - 1, mark, ref tail);
@@ -243,6 +311,27 @@ public sealed unsafe class LiquidGrid
             PushOpen(c - stride, mark, ref tail);
         }
         return amount;
+    }
+
+    int NearestAir(int origin)
+    {
+        int mark = NextMark();
+        int head = 0, tail = 0, stride = Stride;
+        _mark[origin] = mark;
+        PushOpen(origin + 1, mark, ref tail);
+        PushOpen(origin - 1, mark, ref tail);
+        PushOpen(origin + stride, mark, ref tail);
+        PushOpen(origin - stride, mark, ref tail);
+        while (head < tail)
+        {
+            int c = _queue[head++];
+            if (Kind[c] == 0) return c;
+            PushOpen(c + 1, mark, ref tail);
+            PushOpen(c - 1, mark, ref tail);
+            PushOpen(c + stride, mark, ref tail);
+            PushOpen(c - stride, mark, ref tail);
+        }
+        return -1;
     }
 
     void PushOpen(int c, int mark, ref int tail)
@@ -264,55 +353,82 @@ public sealed unsafe class LiquidGrid
 
     void PlaceOverflow()
     {
-        if (Overflow <= 0) return;
-        for (int i = 0; i < Length && Overflow > 0; i++)
+        for (int k = 1; k <= KindCount; k++)
         {
-            if (Solid[i] != 0) continue;
-            int room = Full - Water[i];
-            if (room <= 0) continue;
-            int t = (int)Math.Min(room, Overflow);
-            Water[i] += t;
-            Overflow -= t;
+            for (int i = 0; i < Length && Overflow[k] > 0; i++)
+            {
+                if (Solid[i] != 0 || (Kind[i] != 0 && Kind[i] != k)) continue;
+                int room = Full - Water[i];
+                if (room <= 0) continue;
+                int t = (int)Math.Min(room, Overflow[k]);
+                Water[i] += t;
+                Kind[i] = (byte)k;
+                Overflow[k] -= t;
+            }
         }
     }
 
-    /// <summary>Moves the water into a grid of another size. Cell (x, y) lands at (x + dx, y + dy).
-    /// Water that falls outside, or into a wall, is placed in the nearest cells with room.</summary>
+    /// <summary>Moves everything into a grid of another size. Cell (x, y) lands at (x + dx, y + dy).</summary>
     public LiquidGrid Resized(int width, int height, int dx, int dy, ReadOnlySpan<byte> solid)
     {
-        var next = new LiquidGrid(width, height) { Gravity = Gravity, Strength = Strength };
+        var next = new LiquidGrid(width, height) { Gravity = Gravity, Strength = Strength, Evaporation = Evaporation };
         next.SyncSolid(solid);
-        next.Overflow = Overflow;
+        for (int k = 1; k <= KindCount; k++) next.Overflow[k] = Overflow[k];
         for (int y = 0; y < Height; y++)
         {
             for (int x = 0; x < Width; x++)
             {
-                int w = Water[Index(x, y)];
-                if (w == 0) continue;
-                int nx = Math.Clamp(x + dx, 0, width - 1);
-                int ny = Math.Clamp(y + dy, 0, height - 1);
-                int left = next.Deposit(next.Index(nx, ny), w);
-                if (left > 0) next.Overflow += left;
+                int i = Index(x, y);
+                int nx = Math.Clamp(x + dx, 0, width - 1), ny = Math.Clamp(y + dy, 0, height - 1);
+                int ni = next.Index(nx, ny);
+                if (Water[i] > 0)
+                {
+                    int left = next.Deposit(ni, Water[i], Kind[i]);
+                    if (left > 0) next.Overflow[Kind[i]] += left;
+                }
+                for (int k = 1; k <= KindCount; k++)
+                {
+                    int v = Vapor[k][i];
+                    if (v == 0) continue;
+                    int air = next.Solid[ni] == 0 && next.Kind[ni] == 0 ? ni : next.NearestAir(ni);
+                    if (air >= 0) { next.Vapor[k][air] += v; next._vaporPresent[k] = true; }
+                    else next.Overflow[k] += v;
+                }
             }
         }
         next.PlaceOverflow();
         return next;
     }
 
-    /// <summary>Water above this cell along gravity, in cells, counting the cell itself.</summary>
+    // ---------------------------------------------------------------- queries
+
+    /// <summary>Liquid above this cell along gravity, in cells, counting the cell itself.</summary>
     public float DepthAt(int x, int y)
     {
         if (!InBounds(x, y)) return 0f;
-        int i = Index(x, y);
-        if (Water[i] == 0) return 0f;
         int up = -DownOffset();
         float depth = 0f;
-        for (int c = i; Solid[c] == 0 && Water[c] > 0; c += up)
+        for (int c = Index(x, y); Solid[c] == 0 && Water[c] > 0; c += up)
         {
             depth += (float)Water[c] / Full;
             if (Water[c] < Full) break;
         }
         return depth;
+    }
+
+    /// <summary>Hydrostatic pressure at this cell as a head of water, in cells (density-weighted depth
+    /// times gravity strength).</summary>
+    public float PressureAt(int x, int y)
+    {
+        if (!InBounds(x, y)) return 0f;
+        int up = -DownOffset();
+        float head = 0f;
+        for (int c = Index(x, y); Solid[c] == 0 && Water[c] > 0; c += up)
+        {
+            head += Density[Kind[c]] * Water[c] / Full;
+            if (Water[c] < Full) break;
+        }
+        return head * _strength;
     }
 
     public int DownOffset() => Gravity switch
@@ -327,9 +443,11 @@ public sealed unsafe class LiquidGrid
     {
         Array.Clear(_qx);
         Array.Clear(_qy);
+        Array.Clear(_vel);
     }
 
-    /// <summary>Advances one fixed tick.</summary>
+    // ---------------------------------------------------------------- tick
+
     public void Step()
     {
         Ticks++;
@@ -343,6 +461,8 @@ public sealed unsafe class LiquidGrid
             }
             _fallBudget = 0f;
             for (int p = 0; p < ZeroGPasses; p++) Exchange();
+            if (Evaporation) Evaporate(0f);
+            SpreadVapor();
             return;
         }
 
@@ -352,14 +472,16 @@ public sealed unsafe class LiquidGrid
             ClearMomentum();
             _axis = axis;
         }
-
         _fallBudget += s * FallPassesPerG;
         int passes = (int)_fallBudget;
         _fallBudget -= passes;
         if (passes > MaxFallPasses) passes = MaxFallPasses;
         for (int p = 0; p < passes; p++) Fall();
         Spread(s);
+        Coast();
         Pressure(s);
+        if (Evaporation) Evaporate(s);
+        SpreadVapor();
     }
 
     // ---------------------------------------------------------------- falling
@@ -368,52 +490,70 @@ public sealed unsafe class LiquidGrid
     {
         int w = Width, h = Height, stride = Stride;
         fixed (int* water = Water)
+        fixed (byte* kind = Kind)
         fixed (byte* solid = Solid)
+        fixed (float* vel = _vel)
+        fixed (float* density = Density)
         {
             switch (Gravity)
             {
                 case GridDir.Down:
                     for (int y = 2; y <= h; y++)
-                    {
-                        int row = y * stride;
-                        for (int i = row + 1, end = row + w; i <= end; i++) FallCell(water, solid, i, i - stride);
-                    }
+                        for (int i = y * stride + 1, end = y * stride + w; i <= end; i++) FallCell(water, kind, solid, vel, density, i, i - stride);
                     break;
                 case GridDir.Up:
                     for (int y = h - 1; y >= 1; y--)
-                    {
-                        int row = y * stride;
-                        for (int i = row + 1, end = row + w; i <= end; i++) FallCell(water, solid, i, i + stride);
-                    }
+                        for (int i = y * stride + 1, end = y * stride + w; i <= end; i++) FallCell(water, kind, solid, vel, density, i, i + stride);
                     break;
                 case GridDir.Left:
                     for (int x = 2; x <= w; x++)
-                        for (int i = stride + x, end = h * stride + x; i <= end; i += stride) FallCell(water, solid, i, i - 1);
+                        for (int i = stride + x, end = h * stride + x; i <= end; i += stride) FallCell(water, kind, solid, vel, density, i, i - 1);
                     break;
                 default:
                     for (int x = w - 1; x >= 1; x--)
-                        for (int i = stride + x, end = h * stride + x; i <= end; i += stride) FallCell(water, solid, i, i + 1);
+                        for (int i = stride + x, end = h * stride + x; i <= end; i += stride) FallCell(water, kind, solid, vel, density, i, i + 1);
                     break;
             }
         }
     }
 
-    static void FallCell(int* water, byte* solid, int i, int j)
+    static void FallCell(int* water, byte* kind, byte* solid, float* vel, float* density, int i, int j)
     {
         int wi = water[i];
         if (wi == 0 || solid[j] != 0) return;
-        int room = Full - water[j];
-        if (room <= 0) return;
-        int t = wi < room ? wi : room;
-        water[i] = wi - t;
-        water[j] += t;
+        byte ki = kind[i], kj = kind[j];
+        if (kj == 0 || kj == ki)
+        {
+            int wj = water[j];
+            int room = Full - wj;
+            if (room <= 0) return;
+            int t = wi < room ? wi : room;
+            vel[j] = (vel[j] * wj + vel[i] * t) / (wj + t);
+            water[j] = wj + t;
+            kind[j] = ki;
+            water[i] = wi - t;
+            if (water[i] == 0)
+            {
+                kind[i] = 0;
+                vel[i] = 0f;
+            }
+        }
+        else if (density[ki] > density[kj])
+        {
+            // The heavier liquid sinks through the lighter one by trading places with it.
+            water[i] = water[j];
+            water[j] = wi;
+            kind[i] = kj;
+            kind[j] = ki;
+            (vel[i], vel[j]) = (vel[j], vel[i]);
+        }
     }
 
     // ---------------------------------------------------------------- spreading
 
-    /// <summary>Head = height of the water surface of the column a cell belongs to, measured
-    /// against gravity in cells. Empty cells get the height of their own floor.</summary>
-    void ComputeHeads(int* water, byte* solid, float* head)
+    /// <summary>Head of each cell: its height against gravity plus the density-weighted depth of the
+    /// liquid above it (the pressure there, as a head of water). Empty cells get their floor height.</summary>
+    void ComputeHeads(int* water, byte* kind, byte* solid, float* head, float* density)
     {
         int w = Width, h = Height, stride = Stride;
         switch (Gravity)
@@ -421,98 +561,82 @@ public sealed unsafe class LiquidGrid
             case GridDir.Down:
                 for (int x = 1; x <= w; x++)
                 {
-                    float run = -1f;
-                    for (int y = h; y >= 1; y--) HeadCell(water, solid, head, y * stride + x, y, ref run);
+                    float p = 0f;
+                    for (int y = h; y >= 1; y--) HeadCell(water, kind, solid, head, density, y * stride + x, y, ref p);
                 }
                 break;
             case GridDir.Up:
                 for (int x = 1; x <= w; x++)
                 {
-                    float run = -1f;
-                    for (int y = 1; y <= h; y++) HeadCell(water, solid, head, y * stride + x, h + 1 - y, ref run);
+                    float p = 0f;
+                    for (int y = 1; y <= h; y++) HeadCell(water, kind, solid, head, density, y * stride + x, h + 1 - y, ref p);
                 }
                 break;
             case GridDir.Left:
                 for (int y = 1; y <= h; y++)
                 {
-                    float run = -1f;
-                    int row = y * stride;
-                    for (int x = w; x >= 1; x--) HeadCell(water, solid, head, row + x, x, ref run);
+                    float p = 0f;
+                    for (int x = w; x >= 1; x--) HeadCell(water, kind, solid, head, density, y * stride + x, x, ref p);
                 }
                 break;
             default:
                 for (int y = 1; y <= h; y++)
                 {
-                    float run = -1f;
-                    int row = y * stride;
-                    for (int x = 1; x <= w; x++) HeadCell(water, solid, head, row + x, w + 1 - x, ref run);
+                    float p = 0f;
+                    for (int x = 1; x <= w; x++) HeadCell(water, kind, solid, head, density, y * stride + x, w + 1 - x, ref p);
                 }
                 break;
         }
     }
 
-    static void HeadCell(int* water, byte* solid, float* head, int i, int z, ref float run)
+    static void HeadCell(int* water, byte* kind, byte* solid, float* head, float* density, int i, int z, ref float p)
     {
         if (solid[i] != 0)
         {
-            run = -1f;
+            p = 0f;
             return;
         }
         int wi = water[i];
         if (wi == 0)
         {
             head[i] = z;
-            run = -1f;
+            p = 0f;
             return;
         }
-        if (run < 0f) run = z + (float)wi / Full;
-        head[i] = run;
+        p += density[kind[i]] * wi / Full;
+        head[i] = z + p;
     }
 
-    /// <summary>Marks cells whose water is held up: the next cell along gravity is a wall, or is
-    /// full and itself held up. Falling water is not held up, so it does not spread or press.</summary>
-    void ComputeRest(int* water, byte* solid, byte* rest)
+    void ComputeRest(int* water, byte* kind, byte* solid, byte* rest)
     {
         int w = Width, h = Height, stride = Stride;
         switch (Gravity)
         {
             case GridDir.Down:
-                for (int x = 1; x <= w; x++)
-                {
-                    byte held = 1;
-                    for (int y = 1; y <= h; y++) RestCell(water, solid, rest, y * stride + x, ref held);
-                }
+                for (int x = 1; x <= w; x++) { byte held = 1; for (int y = 1; y <= h; y++) RestCell(water, kind, solid, rest, y * stride + x, stride, ref held); }
                 break;
             case GridDir.Up:
-                for (int x = 1; x <= w; x++)
-                {
-                    byte held = 1;
-                    for (int y = h; y >= 1; y--) RestCell(water, solid, rest, y * stride + x, ref held);
-                }
+                for (int x = 1; x <= w; x++) { byte held = 1; for (int y = h; y >= 1; y--) RestCell(water, kind, solid, rest, y * stride + x, -stride, ref held); }
                 break;
             case GridDir.Left:
-                for (int y = 1; y <= h; y++)
-                {
-                    byte held = 1;
-                    int row = y * stride;
-                    for (int x = 1; x <= w; x++) RestCell(water, solid, rest, row + x, ref held);
-                }
+                for (int y = 1; y <= h; y++) { byte held = 1; for (int x = 1; x <= w; x++) RestCell(water, kind, solid, rest, y * stride + x, 1, ref held); }
                 break;
             default:
-                for (int y = 1; y <= h; y++)
-                {
-                    byte held = 1;
-                    int row = y * stride;
-                    for (int x = w; x >= 1; x--) RestCell(water, solid, rest, row + x, ref held);
-                }
+                for (int y = 1; y <= h; y++) { byte held = 1; for (int x = w; x >= 1; x--) RestCell(water, kind, solid, rest, y * stride + x, -1, ref held); }
                 break;
         }
     }
 
-    static void RestCell(int* water, byte* solid, byte* rest, int i, ref byte held)
+    /// <summary>A cell is held up by a wall, by full liquid that is held, or by another liquid it cannot
+    /// sink into (fuel on water) that is held.</summary>
+    static void RestCell(int* water, byte* kind, byte* solid, byte* rest, int i, int up, ref byte held)
     {
         rest[i] = held;
-        held = solid[i] != 0 ? (byte)1 : water[i] >= Full ? held : (byte)0;
+        if (solid[i] != 0) { held = 1; return; }
+        int wi = water[i];
+        byte above = kind[i + up];
+        bool supports = wi >= Full || (wi > 0 && above != 0 && above != kind[i]);
+        held = supports ? held : (byte)0;
     }
 
     void Spread(float strength)
@@ -521,19 +645,22 @@ public sealed unsafe class LiquidGrid
         float gain = SpreadGain * strength * Full;
         int first = Stride, last = Length - Stride - 1 - lat;
         fixed (int* water = Water)
+        fixed (byte* kind = Kind)
         fixed (byte* solid = Solid)
         fixed (float* head = _head)
         fixed (byte* rest = _rest)
         fixed (float* q = lat == 1 ? _qx : _qy)
         fixed (float* outScale = _cellA)
         fixed (float* inScale = _cellB)
+        fixed (float* vel = _vel)
+        fixed (float* density = Density)
+        fixed (float* fluidity = Fluidity)
         {
-            ComputeHeads(water, solid, head);
-            ComputeRest(water, solid, rest);
+            ComputeHeads(water, kind, solid, head, density);
+            ComputeRest(water, kind, solid, rest);
             new Span<float>(outScale, Length).Clear();
             new Span<float>(inScale, Length).Clear();
 
-            // Desired flow through each sideways face, with momentum.
             for (int i = first; i <= last; i++)
             {
                 int j = i + lat;
@@ -543,12 +670,12 @@ public sealed unsafe class LiquidGrid
                     continue;
                 }
                 int wi = water[i], wj = water[j];
-                if ((wi | wj) == 0)
+                if ((wi | wj) == 0 || (wi != 0 && wj != 0 && kind[i] != kind[j]))
                 {
                     q[i] = 0f;
                     continue;
                 }
-                float flow = q[i] * SpreadMomentum + gain * (head[i] - head[j]);
+                float flow = q[i] * SpreadMomentum + gain * fluidity[wi != 0 ? kind[i] : kind[j]] * (head[i] - head[j]);
                 if (flow > 0f)
                 {
                     if (wi == 0 || rest[i] == 0 || (wj == 0 && wi < FilmMin)) flow = 0f;
@@ -561,8 +688,6 @@ public sealed unsafe class LiquidGrid
                 }
                 q[i] = flow;
             }
-
-            // No cell may send more than it holds.
             for (int i = first; i <= last + lat; i++)
             {
                 float o = outScale[i];
@@ -571,20 +696,10 @@ public sealed unsafe class LiquidGrid
             for (int i = first; i <= last; i++)
             {
                 float flow = q[i];
-                if (flow > 0f)
-                {
-                    flow *= outScale[i];
-                    inScale[i + lat] += flow;
-                }
-                else if (flow < 0f)
-                {
-                    flow *= outScale[i + lat];
-                    inScale[i] -= flow;
-                }
+                if (flow > 0f) { flow *= outScale[i]; inScale[i + lat] += flow; }
+                else if (flow < 0f) { flow *= outScale[i + lat]; inScale[i] -= flow; }
                 q[i] = flow;
             }
-
-            // No cell may receive more than it has room for.
             for (int i = first; i <= last + lat; i++)
             {
                 float n = inScale[i];
@@ -596,22 +711,69 @@ public sealed unsafe class LiquidGrid
                 float flow = q[i];
                 if (flow == 0f) continue;
                 int j = i + lat;
-                int t;
-                if (flow > 0f)
+                int src = flow > 0f ? i : j, dst = flow > 0f ? j : i;
+                int t = (int)(Math.Abs(flow) * inScale[dst]);
+                if (t > 0)
                 {
-                    t = (int)(flow * inScale[j]);
-                    water[i] -= t;
-                    water[j] += t;
+                    int before = water[src];
+                    float v = (flow > 0f ? 1f : -1f) * Math.Min(MaxJet, JetGain * MathF.Sqrt(Math.Abs(head[i] - head[j]) * strength));
+                    int wd = water[dst];
+                    vel[dst] = (vel[dst] * wd + v * t) / (wd + t);
+                    water[dst] = wd + t;
+                    kind[dst] = kind[src];
+                    water[src] = before - t;
+                    if (water[src] == 0) { kind[src] = 0; vel[src] = 0f; }
                 }
-                else
-                {
-                    t = (int)(flow * inScale[i]);
-                    water[i] -= t;
-                    water[j] += t;
-                }
-                q[i] = t;
+                q[i] = flow > 0f ? t : -t;
             }
         }
+    }
+
+    /// <summary>Falling liquid keeps its sideways speed: it moves that share of itself sideways each tick,
+    /// slowed by air. Resting liquid loses its speed to the floor.</summary>
+    void Coast()
+    {
+        int lat = Gravity is GridDir.Up or GridDir.Down ? 1 : Stride;
+        int first = Stride + 1, last = Length - Stride - 2;
+        fixed (int* water = Water)
+        fixed (byte* kind = Kind)
+        fixed (byte* solid = Solid)
+        fixed (byte* rest = _rest)
+        fixed (float* vel = _vel)
+        {
+            // Moving forwards: walk against the motion so each cell moves once per tick.
+            for (int i = last; i >= first; i--) CoastCell(water, kind, solid, rest, vel, i, lat, 1f);
+            for (int i = first; i <= last; i++) CoastCell(water, kind, solid, rest, vel, i, -lat, -1f);
+        }
+    }
+
+    static void CoastCell(int* water, byte* kind, byte* solid, byte* rest, float* vel, int i, int step, float sign)
+    {
+        int wi = water[i];
+        float v = vel[i];
+        if (wi == 0 || v * sign <= 0f) return;
+        int j = i + step;
+        if (rest[i] != 0 && (kind[j] != 0 || solid[j] != 0))
+        {
+            // Held up and pushing into liquid or a wall: the floor takes the speed.
+            vel[i] = v * 0.8f;
+            return;
+        }
+        vel[i] = v * AirDrag;
+        if (solid[j] != 0 || (kind[j] != 0 && kind[j] != kind[i]))
+        {
+            vel[i] = 0f;
+            return;
+        }
+        int room = Full - water[j];
+        int t = Math.Min(room, (int)(wi * Math.Min(1f, v * sign)));
+        if (t <= 0) return;
+        int wj = water[j];
+        vel[j] = (vel[j] * wj + vel[i] * t) / (wj + t);
+        water[j] = wj + t;
+        kind[j] = kind[i];
+        water[i] = wi - t;
+        if (water[i] == 0) { kind[i] = 0; vel[i] = 0f; }
     }
 
     // ---------------------------------------------------------------- pressure
@@ -632,13 +794,14 @@ public sealed unsafe class LiquidGrid
     {
         float rate = Math.Min(1f, PressureRate * strength);
         int down = DownOffset(), stride = Stride;
+        int lat = Gravity is GridDir.Up or GridDir.Down ? 1 : Stride;
         int visited = NextMark();
         int[] water = Water;
-        byte[] solid = Solid;
+        byte[] kind = Kind, solid = Solid;
         for (int start = stride; start < Length - stride; start++)
         {
             if (water[start] < Brim || _mark[start] == visited) continue;
-
+            byte k = kind[start];
             int sinkMark = NextMark();
             int sp = 0, nSrc = 0, nSnk = 0;
             bool held = false;
@@ -651,15 +814,15 @@ public sealed unsafe class LiquidGrid
                 if (_rest[c] != 0) held = true;
                 int up = c - down;
                 int wu = water[up];
-                if (solid[up] != 0 || wu < Brim)
+                bool topOfColumn = solid[up] != 0 || wu < Brim || kind[up] != k;
+                if (topOfColumn)
                 {
-                    // Top of a column: this cell can give, and so can partial water resting on it.
                     float lvl = Elevation(c) + (float)water[c] / Full;
                     _srcCell[nSrc] = c;
                     _srcAvail[nSrc] = water[c];
                     _srcLevel[nSrc++] = lvl;
                     if (lvl > maxSrc) maxSrc = lvl;
-                    if (solid[up] == 0 && wu > 0)
+                    if (solid[up] == 0 && wu > 0 && wu < Brim && kind[up] == k)
                     {
                         lvl = Elevation(up) + (float)wu / Full;
                         _srcCell[nSrc] = up;
@@ -668,20 +831,22 @@ public sealed unsafe class LiquidGrid
                         if (lvl > maxSrc) maxSrc = lvl;
                     }
                 }
-                Visit(c + 1, visited, sinkMark, ref sp, ref nSnk, ref minSnk);
-                Visit(c - 1, visited, sinkMark, ref sp, ref nSnk, ref minSnk);
-                Visit(c + stride, visited, sinkMark, ref sp, ref nSnk, ref minSnk);
-                Visit(c - stride, visited, sinkMark, ref sp, ref nSnk, ref minSnk);
+                Visit(c, c + 1, k, visited, sinkMark, lat, ref sp, ref nSnk, ref minSnk);
+                Visit(c, c - 1, k, visited, sinkMark, lat, ref sp, ref nSnk, ref minSnk);
+                Visit(c, c + stride, k, visited, sinkMark, lat, ref sp, ref nSnk, ref minSnk);
+                Visit(c, c - stride, k, visited, sinkMark, lat, ref sp, ref nSnk, ref minSnk);
             }
             if (!held || nSrc == 0 || nSnk == 0 || maxSrc - minSnk <= PressureDeadBand) continue;
-            Level(nSrc, nSnk, minSnk, maxSrc, rate);
+            Level(k, nSrc, nSnk, minSnk, maxSrc, rate, strength);
         }
     }
 
-    void Visit(int n, int visited, int sinkMark, ref int sp, ref int nSnk, ref float minSnk)
+    void Visit(int c, int n, byte k, int visited, int sinkMark, int lat, ref int sp, ref int nSnk, ref float minSnk)
     {
         if (Solid[n] != 0) return;
         int wn = Water[n];
+        byte kn = Kind[n];
+        if (kn != 0 && kn != k) return;
         if (wn >= Brim)
         {
             if (_mark[n] == visited) return;
@@ -694,12 +859,12 @@ public sealed unsafe class LiquidGrid
         float lvl = Elevation(n) + (float)wn / Full;
         _snkCell[nSnk] = n;
         _snkRoom[nSnk] = Full - wn;
+        _snkSide[nSnk] = n - c == lat ? 1 : n - c == -lat ? -1 : 0;
         _snkLevel[nSnk++] = lvl;
         if (lvl < minSnk) minSnk = lvl;
     }
 
-    /// <summary>Moves water from the sources above a common level to the openings below it.</summary>
-    void Level(int nSrc, int nSnk, float lo, float hi, float rate)
+    void Level(byte kind, int nSrc, int nSnk, float lo, float hi, float rate, float strength)
     {
         float band = PressureDeadBand * 0.5f;
         for (int it = 0; it < 30; it++)
@@ -731,26 +896,40 @@ public sealed unsafe class LiquidGrid
         {
             double share = Math.Min(_snkRoom[k], (double)Full * Math.Max(0f, level - band - _snkLevel[k]));
             int t = (int)Math.Min(_snkRoom[k], (long)(share * fTake));
-            _snkRoom[k] -= t;
-            Water[_snkCell[k]] += t;
+            Place(k, t, kind, level, strength);
             placed += t;
         }
         for (int k = 0; k < nSnk && placed < given; k++)
         {
             int t = (int)Math.Min(_snkRoom[k], given - placed);
             if (t <= 0) continue;
-            _snkRoom[k] -= t;
-            Water[_snkCell[k]] += t;
+            Place(k, t, kind, level, strength);
             placed += t;
         }
-        // Take exactly what was placed from the sources.
         long remaining = placed;
         for (int k = 0; k < nSrc && remaining > 0; k++)
         {
             long g = Math.Min(_give[k], remaining);
-            Water[_srcCell[k]] -= (int)g;
+            int c = _srcCell[k];
+            Water[c] -= (int)g;
+            if (Water[c] == 0) Empty(c);
             remaining -= g;
         }
+    }
+
+    /// <summary>Liquid pushed out of a side opening leaves with the speed its head gives it.</summary>
+    void Place(int sink, int t, byte kind, float level, float strength)
+    {
+        if (t <= 0) return;
+        int c = _snkCell[sink];
+        _snkRoom[sink] -= t;
+        int w = Water[c];
+        float v = 0f;
+        if (_snkSide[sink] != 0)
+            v = _snkSide[sink] * Math.Min(MaxJet, JetGain * MathF.Sqrt(Math.Max(0f, level - _snkLevel[sink]) * strength));
+        _vel[c] = (_vel[c] * w + v * t) / (w + t);
+        Water[c] = w + t;
+        Kind[c] = kind;
     }
 
     double Above(float level, int nSrc)
@@ -777,35 +956,136 @@ public sealed unsafe class LiquidGrid
 
     // ---------------------------------------------------------------- zero gravity
 
-    /// <summary>Neighbouring cells exchange a share of their difference. Uses the state at the
-    /// start of the pass, so the result does not depend on scan order.</summary>
     void Exchange()
     {
         Array.Copy(Water, _prev, Length);
         int stride = Stride, first = stride, last = Length - stride - 1;
         fixed (int* water = Water)
         fixed (int* prev = _prev)
+        fixed (byte* kind = Kind)
         fixed (byte* solid = Solid)
         {
             for (int i = first; i <= last; i++)
             {
                 if (solid[i] != 0) continue;
-                int wi = prev[i];
-                int j = i + 1;
-                if (solid[j] == 0)
-                {
-                    int t = (int)((wi - prev[j]) * ZeroGExchange);
-                    water[i] -= t;
-                    water[j] += t;
-                }
-                j = i + stride;
-                if (solid[j] == 0)
-                {
-                    int t = (int)((wi - prev[j]) * ZeroGExchange);
-                    water[i] -= t;
-                    water[j] += t;
-                }
+                ExchangePair(water, prev, kind, solid, i, i + 1);
+                ExchangePair(water, prev, kind, solid, i, i + stride);
             }
         }
+    }
+
+    static void ExchangePair(int* water, int* prev, byte* kind, byte* solid, int i, int j)
+    {
+        if (solid[j] != 0) return;
+        int t = (int)((prev[i] - prev[j]) * ExchangeShare);
+        if (t == 0) return;
+        int src = t > 0 ? i : j, dst = t > 0 ? j : i;
+        if (t < 0) t = -t;
+        if (kind[src] == 0 || (kind[dst] != 0 && kind[dst] != kind[src]) || water[src] < t) return;
+        water[src] -= t;
+        water[dst] += t;
+        kind[dst] = kind[src];
+        if (water[src] == 0) kind[src] = 0;
+    }
+
+    // ---------------------------------------------------------------- evaporation
+
+    static uint Hash(int i, long tick)
+    {
+        uint h = (uint)i * 2654435761u ^ (uint)tick * 2246822519u;
+        h ^= h >> 15;
+        h *= 2246822519u;
+        return h ^ (h >> 13);
+    }
+
+    /// <summary>Exposed liquid evaporates into the empty cell above it (any empty neighbour with no
+    /// gravity), more slowly as that air nears saturation.</summary>
+    void Evaporate(float strength)
+    {
+        int up = strength > 0f ? -DownOffset() : 0, stride = Stride;
+        for (int i = stride; i < Length - stride; i++)
+        {
+            int w = Water[i];
+            if (w == 0) continue;
+            int air;
+            if (up != 0) air = Solid[i + up] == 0 && Kind[i + up] == 0 ? i + up : -1;
+            else air = Kind[i + 1] == 0 && Solid[i + 1] == 0 ? i + 1 : Kind[i - 1] == 0 && Solid[i - 1] == 0 ? i - 1
+                : Kind[i + stride] == 0 && Solid[i + stride] == 0 ? i + stride : Kind[i - stride] == 0 && Solid[i - stride] == 0 ? i - stride : -1;
+            if (air < 0) continue;
+            int k = Kind[i];
+            int[] vapor = Vapor[k];
+            int sat = Saturation[k];
+            if (vapor[air] >= sat) continue;
+            float amount = EvaporationRate[k] * (1f - (float)vapor[air] / sat);
+            int units = (int)amount;
+            if ((Hash(i, Ticks) & 0xFFFF) < (uint)((amount - units) * 65536f)) units++;
+            units = Math.Min(units, Math.Min(w, sat - vapor[air]));
+            if (units <= 0) continue;
+            Water[i] = w - units;
+            vapor[air] += units;
+            _vaporPresent[k] = true;
+            if (Water[i] == 0) Empty(i);
+        }
+    }
+
+    /// <summary>Vapour spreads between empty cells. Vapour caught in a cell liquid has moved into
+    /// condenses into it if it is the same liquid, or moves on to an empty neighbour.</summary>
+    void SpreadVapor()
+    {
+        int stride = Stride, first = stride, last = Length - stride - 1;
+        for (int k = 1; k <= KindCount; k++)
+        {
+            if (!_vaporPresent[k]) continue;
+            int[] vapor = Vapor[k];
+            Array.Copy(vapor, _prev, Length);
+            long sum = 0;
+            fixed (int* v = vapor)
+            fixed (int* prev = _prev)
+            fixed (byte* kind = Kind)
+            fixed (byte* solid = Solid)
+            fixed (int* water = Water)
+            {
+                for (int i = first; i <= last; i++)
+                {
+                    if (solid[i] != 0) continue;
+                    if (kind[i] != 0)
+                    {
+                        int held = v[i];
+                        if (held == 0) continue;
+                        if (kind[i] == k)
+                        {
+                            int t = Math.Min(held, Full - water[i]);
+                            water[i] += t;
+                            v[i] -= t;
+                            held -= t;
+                        }
+                        if (held == 0) continue;
+                        int to = kind[i + 1] == 0 && solid[i + 1] == 0 ? i + 1 : kind[i - 1] == 0 && solid[i - 1] == 0 ? i - 1
+                            : kind[i + stride] == 0 && solid[i + stride] == 0 ? i + stride : kind[i - stride] == 0 && solid[i - stride] == 0 ? i - stride : -1;
+                        if (to >= 0)
+                        {
+                            v[to] += held;
+                            v[i] -= held;
+                        }
+                        continue;
+                    }
+                    if (prev[i] == 0 && prev[i + 1] == 0 && prev[i + stride] == 0) continue;
+                    sum += prev[i];
+                    VaporPair(v, prev, kind, solid, i, i + 1);
+                    VaporPair(v, prev, kind, solid, i, i + stride);
+                }
+            }
+            if (sum == 0 && VaporOf(k) == 0) _vaporPresent[k] = false;
+        }
+    }
+
+    static void VaporPair(int* v, int* prev, byte* kind, byte* solid, int i, int j)
+    {
+        if (solid[j] != 0 || kind[j] != 0) return;
+        int t = (int)((prev[i] - prev[j]) * ExchangeShare);
+        if (t == 0) return;
+        if (t > 0 ? v[i] < t : v[j] < -t) return;
+        v[i] -= t;
+        v[j] += t;
     }
 }

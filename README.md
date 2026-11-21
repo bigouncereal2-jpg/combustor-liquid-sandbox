@@ -12,6 +12,21 @@ of gas. Regular Sandbox and every other mode are unchanged.
 Tested with Combustor Steam build **26701522** (app 5047230, Unity 6000.3.2f1, game version 1.0),
 MelonLoader **0.7.3** (IL2CPP, net6 runtime), Windows 11.
 
+## New in 1.1.0 (work in progress)
+
+- **Three liquids**: water, gasoline and diesel, picked under AMBIENT. Each has its own density, so
+  gasoline and diesel float on water and a heavier liquid sinks through a lighter one; gasoline flows
+  fastest and diesel slowest.
+- **Evaporation**: exposed surfaces evaporate into the empty cell above until that air is saturated
+  (gasoline quickly, water slowly, diesel very slowly). Vapour spreads through empty space and shows as
+  a faint haze; liquid plus vapour is still kept exactly, so a sealed tank only loses what saturates its
+  air. It can be turned off.
+- **Pressure**: flow is driven by the density-weighted pressure of the liquid above, and liquid pushed
+  out of an opening leaves with a speed set by its depth, so a hole low in a full tank shoots a jet
+  that flies further than one from a shallow tank. The inspector shows pressure.
+- **Streams**: falling liquid is drawn as a continuous stream (thin trickles as droplets) instead of
+  stacked bars; only resting liquid shows a level surface and darkens with depth.
+
 ## Features
 
 - **Gravity control** in the AMBIENT panel, in place of the wind control. It is the game's own wind

@@ -37,6 +37,9 @@ public sealed class LiquidSession
         set => Water.Gravity = value;
     }
 
+    /// <summary>Liquid the Liquid tool pours (LiquidGrid.Water1, Gasoline or Diesel).</summary>
+    public int SelectedKind { get; set; } = LiquidGrid.Water1;
+
     public float Strength
     {
         get => Water.Strength;
@@ -172,7 +175,7 @@ public sealed class LiquidSession
         }
         else
         {
-            var next = new LiquidGrid(grid.Width, grid.Height) { Gravity = Water.Gravity, Strength = Water.Strength };
+            var next = new LiquidGrid(grid.Width, grid.Height) { Gravity = Water.Gravity, Strength = Water.Strength, Evaporation = Water.Evaporation };
             next.SyncSolid(solid);
             Water = next;
         }
@@ -207,7 +210,7 @@ public sealed class LiquidSession
     internal void Pour(int x, int y, float moles)
     {
         if (!(moles > 0f)) return;
-        Water.Add(x, y, ToUnits(moles * CellsPerMole));
+        Water.Add(x, y, ToUnits(moles * CellsPerMole), SelectedKind);
     }
 
     internal void Drain(int x, int y, float share)

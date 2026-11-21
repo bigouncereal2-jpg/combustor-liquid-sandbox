@@ -24,7 +24,9 @@ internal sealed class LiquidHud
     const string ZeroOn = "<b>Zero g</b>", ZeroOff = "Zero g", OneOn = "<b>1 g</b>", OneOff = "1 g";
     const string ZeroHint = "<color=#8c94a3>No gravity: water has no down, and neighbouring cells even out.</color>";
     const string LiveHint = "<color=#8c94a3>Changes apply to the water already in the grid.</color>";
-    const string WaterHint = "<color=#8c94a3>A pours (Water tool), S drains. Walls block it; sealed containers keep every drop.</color>";
+    const string WaterHint = "<color=#8c94a3>A pours the picked liquid, S drains. Fuels float on water. Exposed surfaces evaporate until the air above is saturated; vapour shows as haze.</color>";
+    static readonly string[] KindHex = { "", "#4ea8f5", "#fad660", "#cc923e" };
+    const string EvapOn = "Evaporation: <b>on</b>", EvapOff = "Evaporation: off";
     const string Outside = "Cursor outside the grid";
 
     readonly LiquidSession _session;
@@ -84,15 +86,53 @@ internal sealed class LiquidHud
     /// <summary>Takes the background gas panel's place.</summary>
     public void DrawWaterPanel(GasSimHud hud)
     {
-        long total = _session.Water.Total();
+        var water = _session.Water;
+        GUILayout.BeginHorizontal(Gui.None);
+        for (int k = 1; k <= LiquidGrid.KindCount; k++)
+        {
+            if (SimGui.Button(KindLabels[k, _session.SelectedKind == k ? 1 : 0], hud._button, Gui.RowHeight))
+            {
+                _session.SelectedKind = k;
+                _session.Input?.SelectTool(Tool.Gas);
+            }
+        }
+        GUILayout.EndHorizontal();
+        long total = water.Total();
         if (total != _totalShown)
         {
             _totalShown = total;
-            _totalText = Dim("water") + " <b>" + (total / (double)LiquidGrid.Full).ToString("0.00") + "</b> " + Dim("cells");
+            var sb = new StringBuilder();
+            for (int k = 1; k <= LiquidGrid.KindCount; k++)
+            {
+                long liquid = water.LiquidOf(k), vapor = water.VaporOf(k);
+                if (liquid == 0 && vapor == 0) continue;
+                if (sb.Length > 0) sb.Append('\n');
+                sb.Append("<color=").Append(KindHex[k]).Append('>').Append(LiquidGrid.Names[k].ToLowerInvariant()).Append("</color> <b>")
+                  .Append((liquid / (double)LiquidGrid.Full).ToString("0.00")).Append("</b>");
+                if (vapor > 0) sb.Append(Dim("  vapour ")).Append((vapor / (double)LiquidGrid.Full).ToString("0.00"));
+                sb.Append(Dim(" cells"));
+            }
+            _totalText = sb.Length == 0 ? Dim("no liquid yet") : sb.ToString();
         }
         GUILayout.Label(_totalText, hud._label, Gui.None);
-        if (SimGui.Button("Drain all water", hud._button, Gui.RowHeight)) _session.ClearWater();
+        GUILayout.BeginHorizontal(Gui.None);
+        if (SimGui.Button(water.Evaporation ? EvapOn : EvapOff, hud._button, Gui.RowHeight)) water.Evaporation = !water.Evaporation;
+        if (SimGui.Button("Drain all", hud._button, Gui.RowHeight)) _session.ClearWater();
+        GUILayout.EndHorizontal();
         GUILayout.Label(WaterHint, hud._dim, Gui.None);
+    }
+
+    static readonly string[,] KindLabels = BuildKindLabels();
+
+    static string[,] BuildKindLabels()
+    {
+        var labels = new string[LiquidGrid.KindCount + 1, 2];
+        for (int k = 1; k <= LiquidGrid.KindCount; k++)
+        {
+            labels[k, 0] = "<color=" + KindHex[k] + ">" + LiquidGrid.Names[k] + "</color>";
+            labels[k, 1] = "<b>[ <color=" + KindHex[k] + ">" + LiquidGrid.Names[k] + "</color> ]</b>";
+        }
+        return labels;
     }
 
     /// <summary>Same box, place and text style as the game's cell inspector.</summary>
@@ -146,19 +186,31 @@ internal sealed class LiquidHud
         else
         {
             int amount = water.Get(x, y);
-            if (amount == 0) sb.Append(Dim("empty"));
+            if (amount == 0)
+            {
+                sb.Append(Dim("empty"));
+                for (int k = 1; k <= LiquidGrid.KindCount; k++)
+                {
+                    int v = water.VaporAt(x, y, k);
+                    if (v > 0) sb.Append("   ").Append(LiquidGrid.Names[k].ToLowerInvariant()).Append(Dim(" vapour "))
+                        .Append((100.0 * v / LiquidGrid.Saturation[k]).ToString("0")).Append(Dim("% saturated"));
+                }
+            }
             else
             {
+                int kind = water.KindAt(x, y);
                 double fill = amount / (double)LiquidGrid.Full;
-                sb.Append("water <b>").Append((fill * 100).ToString(fill < 0.1 ? "0.0" : "0")).Append("%</b>");
+                sb.Append("<color=").Append(KindHex[kind]).Append('>').Append(LiquidGrid.Names[kind].ToLowerInvariant()).Append("</color> <b>")
+                  .Append((fill * 100).ToString(fill < 0.1 ? "0.0" : "0")).Append("%</b>");
                 if (water.Strength > 0f)
                 {
                     float depth = water.DepthAt(x, y);
-                    if (depth >= 1f) sb.Append(Dim("   depth ")).Append(depth.ToString("0.0")).Append(Dim(" cells"));
+                    if (depth >= 1f) sb.Append(Dim("   depth ")).Append(depth.ToString("0.0"));
+                    sb.Append(Dim("   pressure ")).Append(water.PressureAt(x, y).ToString("0.0")).Append(Dim(" cells of water"));
                 }
             }
         }
-        sb.Append('\n').Append(Dim("all water ")).Append((total / (double)LiquidGrid.Full).ToString("0.00")).Append(Dim(" cells"));
+        sb.Append('\n').Append(Dim("all liquid and vapour ")).Append((total / (double)LiquidGrid.Full).ToString("0.00")).Append(Dim(" cells"));
         return sb.ToString();
     }
 

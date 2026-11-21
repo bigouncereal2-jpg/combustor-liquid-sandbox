@@ -1,4 +1,4 @@
-Liquid Sandbox 1.0.0 for Combustor (work in progress)
+Liquid Sandbox 1.1.0 for Combustor (work in progress)
 
 This is an early, unfinished mod: expect rough edges and changes.
 

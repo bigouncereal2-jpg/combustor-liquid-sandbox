@@ -232,7 +232,7 @@ Run("A block of water falls, spreads and settles flat in a box", () =>
 Run("Water in a cup stays in the cup and its surface levels out", () =>
 {
     int w = 50, h = 40;
-    var g = new LiquidGrid(w, h);
+    var g = new LiquidGrid(w, h) { Evaporation = false };
     var s = Box(w, h);
     Wall(s, w, 10, 5, 30, 5);   // floor
     Wall(s, w, 10, 5, 10, 25);  // left side
@@ -364,7 +364,7 @@ Run("Painting walls over a sealed, full container keeps every drop", () =>
     long total = g.Total();
     Wall(s, w, 8, 8, 12, 12);   // a solid block inside the full tank
     g.SyncSolid(s);
-    Check(g.Total() == total, $"total kept after displacement ({g.Total()} == {total}, overflow {g.Overflow})");
+    Check(g.Total() == total, $"total kept after displacement ({g.Total()} == {total}, overflow {g.Overflow[1]})");
     Check(CellsValid(g), "cells valid");
     for (int t = 0; t < 200; t++) g.Step();
     Check(g.Total() == total, "total kept while the overflow waits for room");
@@ -372,7 +372,7 @@ Run("Painting walls over a sealed, full container keeps every drop", () =>
     g.SyncSolid(s);
     for (int t = 0; t < 2000; t++) g.Step();
     Check(g.Total() == total, "total kept after draining through a hole");
-    Check(g.Overflow == 0, "overflow placed once there was room");
+    Check(g.Overflow[1] == 0, "overflow placed once there was room");
 });
 
 Run("Changing grid size keeps the water", () =>
@@ -384,7 +384,7 @@ Run("Changing grid size keeps the water", () =>
     Check(bigger.Total() == total, "bigger grid total");
     Check(bigger.Get(15, 5) == F, "water moved by the offset");
     var smaller = bigger.Resized(20, 12, -20, -5, Box(20, 12));
-    Check(smaller.Total() == total || smaller.Overflow > 0, $"smaller grid total {smaller.Total()} == {total} (overflow {smaller.Overflow})");
+    Check(smaller.Total() == total || smaller.Overflow[1] > 0, $"smaller grid total {smaller.Total()} == {total} (overflow {smaller.Overflow[1]})");
 });
 
 Run("Dam break frames", () =>
@@ -403,6 +403,71 @@ Run("Dam break frames", () =>
     double lo = double.MaxValue, hi = double.MinValue;
     for (int x = 0; x < w; x++) { double lv = Level(g, x, 0, h - 1); lo = Math.Min(lo, lv); hi = Math.Max(hi, lv); }
     Check(hi - lo < 0.35, $"settled flat after 600 ticks: {lo:0.000}..{hi:0.000}");
+});
+
+Run("Fuels float on water and keep apart from it", () =>
+{
+    int w = 40, h = 30;
+    var g = new LiquidGrid(w, h) { Evaporation = false };
+    Fill(g, 0, 0, w - 1, 5);                       // water
+    for (int y = 15; y <= 20; y++) for (int x = 10; x <= 29; x++) g.Add(x, y, F, LiquidGrid.Gasoline);
+    for (int y = 22; y <= 26; y++) for (int x = 5; x <= 34; x++) g.Add(x, y, F, LiquidGrid.Diesel);
+    long water = g.Total(1), gas = g.Total(2), diesel = g.Total(3);
+    for (int t = 0; t < 3000; t++) g.Step();
+    Png(g, "layers_end");
+    Check(g.Total(1) == water && g.Total(2) == gas && g.Total(3) == diesel, "each liquid kept exactly");
+    int wrong = 0;
+    for (int x = 0; x < w; x++)
+        for (int y = 1; y < h; y++)
+        {
+            int below = g.KindAt(x, y - 1), here = g.KindAt(x, y);
+            if (here != 0 && below != 0 && here != below && LiquidGrid.Density[here] > LiquidGrid.Density[below]) wrong++;
+        }
+    Check(wrong == 0, $"no heavier liquid sits on a lighter one ({wrong} cells)");
+    Check(g.KindAt(20, 0) == 1, "water at the bottom");
+});
+
+Run("Evaporation into sealed air stops when the air is saturated", () =>
+{
+    int w = 30, h = 20;
+    var g = new LiquidGrid(w, h);
+    for (int y = 0; y <= 2; y++) for (int x = 0; x < w; x++) g.Add(x, y, F, LiquidGrid.Gasoline);
+    long total = g.Total(2), liquid0 = g.LiquidOf(2);
+    for (int t = 0; t < 20000; t++) g.Step();
+    long liquid = g.LiquidOf(2), vapor = g.VaporOf(2);
+    long air = (long)w * h - liquid0 / F;
+    Check(g.Total(2) == total, $"liquid + vapour kept exactly ({liquid / (double)F:0.00} + {vapor / (double)F:0.00} cells)");
+    Check(vapor > 0 && vapor <= air * LiquidGrid.Saturation[2], "some evaporated, no more than the air can hold");
+    var open = new LiquidGrid(w, h);
+    for (int x = 0; x < w; x++) open.Add(x, 0, F / 4, LiquidGrid.Water1);
+    long before = open.LiquidOf(1);
+    for (int t = 0; t < 2000; t++) open.Step();
+    Check(open.LiquidOf(1) < before && open.Total(1) == before, "water evaporates slowly and is accounted for as vapour");
+});
+
+Run("Deeper water spouts further from a hole (pressure)", () =>
+{
+    double Reach(int depth)
+    {
+        int w = 160, h = 90;
+        var g = new LiquidGrid(w, h) { Evaporation = false };
+        var s = Box(w, h);
+        Wall(s, w, 0, 40, 20, 40);                  // tank floor
+        Wall(s, w, 20, 41, 20, 89);                 // tank right wall
+        s[42 * w + 20] = 0;                         // hole near the bottom
+        g.SyncSolid(s);
+        Fill(g, 0, 41, 19, 40 + depth);
+        int far = 0;
+        for (int t = 0; t < 16; t++)
+        {
+            g.Step();
+            for (int x = 21; x < w; x++) for (int y = 5; y < 41; y++) if (g.Get(x, y) > F / 10) far = Math.Max(far, x - 20);
+        }
+        Png(g, $"jet_{depth}", 3);
+        return far;
+    }
+    double shallow = Reach(4), deep = Reach(45);
+    Check(deep > shallow + 5, $"jet reach: 4 cells deep {shallow}, 45 cells deep {deep}");
 });
 
 Run("Performance on the default 256 x 160 sandbox grid", () =>
