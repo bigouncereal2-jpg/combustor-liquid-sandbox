@@ -77,6 +77,15 @@ public sealed unsafe class LiquidGrid
     /// <summary>Liquid per kind that could not be placed because there was no room.</summary>
     public readonly long[] Overflow = new long[KindCount + 1];
 
+    /// <summary>How easily each liquid catches fire (0 = never): gasoline readily, diesel reluctantly.</summary>
+    public static readonly float[] Flammability = { 0f, 0f, 1f, 0.15f };
+    /// <summary>Units of liquid a burning cell consumes per tick.</summary>
+    static readonly int[] BurnRate = { 0, 0, Full / 150, Full / 400 };
+    /// <summary>Nonzero where a cell's liquid is burning.</summary>
+    public readonly byte[] Fire;
+    /// <summary>Liquid and vapour burned away, per kind (it leaves as exhaust gas).</summary>
+    public readonly long[] Burned = new long[KindCount + 1];
+
     public GridDir Gravity { get; set; } = GridDir.Down;
     public bool Evaporation { get; set; } = true;
 
@@ -109,6 +118,7 @@ public sealed unsafe class LiquidGrid
         Length = Stride * (height + 2);
         Water = new int[Length];
         Kind = new byte[Length];
+        Fire = new byte[Length];
         Solid = new byte[Length];
         Vapor = new int[KindCount + 1][];
         for (int k = 1; k <= KindCount; k++) Vapor[k] = new int[Length];
@@ -163,6 +173,14 @@ public sealed unsafe class LiquidGrid
             if (k[i] == kind) sum += w[i];
             sum += v[i];
         }
+        return sum;
+    }
+
+    /// <summary>Everything ever placed and not drained: liquid, vapour, overflow and what has burned.</summary>
+    public long Accounted()
+    {
+        long sum = 0;
+        for (int k = 1; k <= KindCount; k++) sum += Total(k) + Burned[k];
         return sum;
     }
 
@@ -229,9 +247,73 @@ public sealed unsafe class LiquidGrid
         return t;
     }
 
+    /// <summary>Sets a flammable liquid (or its vapour) at a cell alight. Returns true if it caught.</summary>
+    public bool Ignite(int x, int y)
+    {
+        if (!InBounds(x, y)) return false;
+        int i = Index(x, y);
+        if (Water[i] > 0 && Flammability[Kind[i]] > 0f) { Fire[i] = 1; return true; }
+        for (int k = 1; k <= KindCount; k++)
+            if (Flammability[k] >= 0.5f && Vapor[k][i] > 0) { Fire[i] = 1; return true; }
+        return false;
+    }
+
+    /// <summary>One tick of fire. A burning cell needs oxygen in the air beside it (<paramref name="air"/>
+    /// says whether a padded cell's gas can feed a flame), consumes its fuel, spreads to flammable
+    /// neighbours and through flammable vapour, and goes out when it runs out of fuel or air.
+    /// <paramref name="burnt"/> receives (cell, units) for each consumption, so the caller can release
+    /// exhaust and heat. Returns how many cells are burning.</summary>
+    public int Burn(Func<int, bool> air, Action<int, int> burnt)
+    {
+        int burning = 0, stride = Stride;
+        for (int i = stride; i < Length - stride; i++)
+        {
+            if (Fire[i] == 0) continue;
+            if (Fire[i] == 2) { Fire[i] = 1; continue; }   // caught this tick: burns from the next
+            int k = Kind[i];
+            int fuelVapor = 0;
+            for (int f = 1; f <= KindCount; f++) if (Flammability[f] >= 0.5f && Vapor[f][i] > 0) fuelVapor = f;
+            bool liquidFuel = Water[i] > 0 && Flammability[k] > 0f;
+            if ((!liquidFuel && fuelVapor == 0) || !air(i))
+            {
+                Fire[i] = 0;
+                continue;
+            }
+            burning++;
+            if (fuelVapor != 0)
+            {
+                int v = Vapor[fuelVapor][i];
+                Vapor[fuelVapor][i] = 0;
+                Burned[fuelVapor] += v;
+                burnt(i, v);
+            }
+            if (liquidFuel)
+            {
+                int t = Math.Min(Water[i], BurnRate[k]);
+                Water[i] -= t;
+                Burned[k] += t;
+                burnt(i, t);
+                if (Water[i] == 0) { Empty(i); Fire[i] = 0; }
+            }
+            else Fire[i] = 0;
+            // Spread to neighbours: liquid by its flammability, vapour of a volatile fuel at once.
+            Spread(i + 1); Spread(i - 1); Spread(i + stride); Spread(i - stride);
+        }
+        return burning;
+
+        void Spread(int n)
+        {
+            if (Solid[n] != 0 || Fire[n] != 0) return;
+            float chance = Water[n] > 0 ? Flammability[Kind[n]] * 0.35f : 0f;
+            for (int f = 1; f <= KindCount; f++) if (Flammability[f] >= 0.5f && Vapor[f][n] > Saturation[f] / 20) chance = 1f;
+            if (chance > 0f && (Hash(n, Ticks) & 0xFFFF) < (uint)(chance * 65535f)) Fire[n] = 2;
+        }
+    }
+
     void Empty(int i)
     {
         Kind[i] = 0;
+        Fire[i] = 0;
         _vel[i] = 0f;
     }
 
@@ -239,6 +321,8 @@ public sealed unsafe class LiquidGrid
     {
         Array.Clear(Water);
         Array.Clear(Kind);
+        Array.Clear(Fire);
+        Array.Clear(Burned);
         for (int k = 1; k <= KindCount; k++) Array.Clear(Vapor[k]);
         Array.Clear(Overflow);
         Array.Clear(_vaporPresent);

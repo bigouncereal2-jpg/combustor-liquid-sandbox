@@ -132,9 +132,9 @@ internal static class Hooks
         return true;
     }
 
-    static bool AddHeatPrefix(GasGrid __instance, int x, int y)
+    static bool AddHeatPrefix(GasGrid __instance, int x, int y, float targetTemperature)
     {
-        For(__instance)?.Heat(x, y);
+        For(__instance)?.Heat(x, y, targetTemperature);
         return true;
     }
 

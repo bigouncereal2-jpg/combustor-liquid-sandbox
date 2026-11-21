@@ -207,6 +207,7 @@ internal sealed class LiquidHud
                 double fill = amount / (double)LiquidGrid.Full;
                 sb.Append("<color=").Append(KindHex[kind]).Append('>').Append(LiquidGrid.Names[kind].ToLowerInvariant()).Append("</color> <b>")
                   .Append((fill * 100).ToString(fill < 0.1 ? "0.0" : "0")).Append("%</b>");
+                if (water.Fire[water.Index(x, y)] != 0) sb.Append("  <color=#ff8a3c><b>burning</b></color>");
                 if (water.Strength > 0f)
                 {
                     float depth = water.DepthAt(x, y);

@@ -145,6 +145,8 @@ public sealed class LiquidSession
         {
             Water.SyncSolid(grid.Solid.AsSpan());
             Water.Step();
+            _gasGrid = grid;
+            BurnFuel(grid);
         }
         catch (Exception error)
         {
@@ -215,7 +217,72 @@ public sealed class LiquidSession
     internal bool HoversLiquid => Input != null && Input.HoverValid && Water.Get(Input.HoverX, Input.HoverY) > 0;
 
     /// <summary>Heat boils the liquid under it into vapour (the heat brush and igniters).</summary>
-    internal void Heat(int x, int y) => Water.Boil(x, y, LiquidGrid.Full / 16);
+    GasGrid _gasGrid;
+
+    internal void Heat(int x, int y, float temperature)
+    {
+        if (_burning) return;
+        if (temperature >= IgnitionTemperature) Water.Ignite(x, y);
+        Water.Boil(x, y, LiquidGrid.Full / 16);
+    }
+
+    const float IgnitionTemperature = 500f;
+    const int ExhaustSpecies = 3;
+    const float FlameTemperature = 1800f;
+    const float MolesPerCellBurned = 0.6f;
+    bool _burning;
+    Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<float> _gas, _heat;
+    Func<int, bool> _hasAir;
+    Action<int, int> _burnt;
+
+    /// <summary>Fire on the liquid: it needs gas beside it to burn, and releases hot exhaust into the
+    /// game's gas, so it heats the air and can light fuel gas the game's own way. Hot gas lights fuel.</summary>
+    void BurnFuel(GasGrid grid)
+    {
+        _gas = grid.Amount;
+        _heat = grid.Temperature;
+        _hasAir ??= i => HasAir(i);
+        _burnt ??= (i, units) => Exhaust(i, units);
+        if (Water.Ticks % 8 == 0) LightFromHotGas();
+        _burning = true;
+        try { Water.Burn(_hasAir, _burnt); }
+        finally { _burning = false; }
+    }
+
+    int GridIndex(int padded) => (padded / Water.Stride - 1) * Water.Width + padded % Water.Stride - 1;
+
+    bool HasAir(int padded)
+    {
+        var gas = _gas;
+        if (gas == null) return false;
+        int stride = Water.Stride;
+        foreach (int n in stackalloc[] { padded, padded + 1, padded - 1, padded + stride, padded - stride })
+        {
+            int x = n % stride - 1, y = n / stride - 1;
+            if (Water.InBounds(x, y) && !Water.IsSolid(x, y) && gas[y * Water.Width + x] > 0.02f) return true;
+        }
+        return false;
+    }
+
+    void Exhaust(int padded, int units)
+    {
+        int x = padded % Water.Stride - 1, y = padded / Water.Stride - 1;
+        _gasGrid?.AddGas(x, y, ExhaustSpecies, units / (float)LiquidGrid.Full * MolesPerCellBurned, FlameTemperature);
+    }
+
+    void LightFromHotGas()
+    {
+        var heat = _heat;
+        if (heat == null) return;
+        int w = Water.Width, h = Water.Height;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+            {
+                int i = Water.Index(x, y);
+                if (Water.Fire[i] != 0 || Water.Water[i] == 0 || LiquidGrid.Flammability[Water.Kind[i]] <= 0f) continue;
+                if (heat[y * w + x] >= IgnitionTemperature / LiquidGrid.Flammability[Water.Kind[i]]) Water.Ignite(x, y);
+            }
+    }
 
     static int ToUnits(float cells) => (int)Math.Min(int.MaxValue, Math.Ceiling(cells * LiquidGrid.Full));
 

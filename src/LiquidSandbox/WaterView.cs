@@ -92,11 +92,19 @@ internal sealed unsafe class WaterView
                     continue;
                 }
                 int kind = water.Kind[i];
+                if (water.Fire[i] != 0) { pixels[k] = Flame(i, water.Ticks); depth = 0; continue; }
                 if (amount >= LiquidGrid.Full)
                     pixels[k] = level && water.Rests(i) ? _depthColors[kind, Math.Min(depth, DepthSteps)] : Light[kind];
                 depth = water.Rests(i) ? depth + 1 : 0;
             }
         }
+    }
+
+    static Color32 Flame(int i, long tick)
+    {
+        uint h = (uint)i * 2654435761u ^ (uint)(tick / 3) * 2246822519u;
+        h ^= h >> 15;
+        return Color32.Lerp(new Color32(255, 96, 24, 255), new Color32(255, 214, 90, 255), (h & 255) / 255f);
     }
 
     /// <summary>Vapour shows as a faint haze of its liquid's colour, by how saturated the air is.</summary>
@@ -185,7 +193,7 @@ internal sealed unsafe class WaterView
                 if (amount <= 0 || amount >= LiquidGrid.Full || solid[srow + x] != 0) continue;
                 float f = (float)amount / LiquidGrid.Full;
                 float x0 = ox + x * size, y0 = oy + y * size, x1 = x0 + size, y1 = y0 + size;
-                Color32 tint = Light[water.Kind[i]];
+                Color32 tint = water.Fire[i] != 0 ? Flame(i, water.Ticks) : Light[water.Kind[i]];
                 uint color = Pack(tint, 255);
                 if (!level)
                 {

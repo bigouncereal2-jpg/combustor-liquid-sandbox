@@ -10,7 +10,7 @@ namespace LiquidSandbox;
 
 public sealed class LiquidSandboxMod : MelonMod
 {
-    public const string Version = "1.2.0";
+    public const string Version = "1.3.0";
 
     internal static MelonLogger.Instance Log { get; private set; }
 
