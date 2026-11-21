@@ -146,7 +146,9 @@ public sealed class LiquidSession
             Water.SyncSolid(grid.Solid.AsSpan());
             Water.Step();
             _gasGrid = grid;
-            BurnFuel(grid);
+            _temperature = grid.Temperature;
+            if (_fuelSpecies == -1) ConnectFuelGas(grid);
+            else if (_fuelSpecies >= 0 && Water.Vent == null) ConnectFuelGas(grid);
         }
         catch (Exception error)
         {
@@ -221,67 +223,51 @@ public sealed class LiquidSession
 
     internal void Heat(int x, int y, float temperature)
     {
-        if (_burning) return;
-        if (temperature >= IgnitionTemperature) Water.Ignite(x, y);
+        _heatTarget = temperature;
         Water.Boil(x, y, LiquidGrid.Full / 16);
     }
 
-    const float IgnitionTemperature = 500f;
-    const int ExhaustSpecies = 3;
-    const float FlameTemperature = 1800f;
-    const float MolesPerCellBurned = 0.6f;
-    bool _burning;
-    Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<float> _gas, _heat;
-    Func<int, bool> _hasAir;
-    Action<int, int> _burnt;
+    // Fuels evaporate into the game's own Fuel gas, so they burn exactly like fuel in an engine: the
+    // game's igniters, reactions and flames. Hot air above a pool makes it evaporate faster, which keeps
+    // a fire fed until the liquid is gone or the air runs out.
+    static readonly float[] VentRate = { 0f, 0f, 26f, 0.6f };      // units per tick per exposed cell at 293 K
+    static readonly float[] VentHeat = { 1f, 1f, 90f, 45f };       // kelvin per e-fold of that rate
+    const float MaxVentBoost = 60f;
+    const float MolesPerLiquidCell = 3f;
+    int _fuelSpecies = -1;
+    float _heatTarget = 600f;
+    readonly float[] _ventCarry = new float[LiquidGrid.KindCount + 1];
+    Il2CppStructArray<float> _temperature;
 
-    /// <summary>Fire on the liquid: it needs gas beside it to burn, and releases hot exhaust into the
-    /// game's gas, so it heats the air and can light fuel gas the game's own way. Hot gas lights fuel.</summary>
-    void BurnFuel(GasGrid grid)
+    void ConnectFuelGas(GasGrid grid)
     {
-        _gas = grid.Amount;
-        _heat = grid.Temperature;
-        _hasAir ??= i => HasAir(i);
-        _burnt ??= (i, units) => Exhaust(i, units);
-        if (Water.Ticks % 8 == 0) LightFromHotGas();
-        _burning = true;
-        try { Water.Burn(_hasAir, _burnt); }
-        finally { _burning = false; }
+        var species = grid.Species;
+        for (int k = 0; species != null && k < species.Length; k++)
+            if (species[k] != null && string.Equals(species[k].name, "Fuel", StringComparison.OrdinalIgnoreCase)) { _fuelSpecies = k; break; }
+        LiquidSandboxMod.Log.Msg(_fuelSpecies >= 0
+            ? $"Gasoline and diesel evaporate into the game's {species[_fuelSpecies].name} gas (species {_fuelSpecies})."
+            : "No Fuel gas found in this build; fuel vapour stays in the liquid layer.");
+        if (_fuelSpecies < 0) { _fuelSpecies = -2; return; }
+        Water.Vents[LiquidGrid.Gasoline] = true;
+        Water.Vents[LiquidGrid.Diesel] = true;
+        Water.Vent = VentToGas;
     }
 
-    int GridIndex(int padded) => (padded / Water.Stride - 1) * Water.Width + padded % Water.Stride - 1;
-
-    bool HasAir(int padded)
+    int VentToGas(int kind, int liquidCell, int airCell, int most, bool forced)
     {
-        var gas = _gas;
-        if (gas == null) return false;
-        int stride = Water.Stride;
-        foreach (int n in stackalloc[] { padded, padded + 1, padded - 1, padded + stride, padded - stride })
-        {
-            int x = n % stride - 1, y = n / stride - 1;
-            if (Water.InBounds(x, y) && !Water.IsSolid(x, y) && gas[y * Water.Width + x] > 0.02f) return true;
-        }
-        return false;
-    }
-
-    void Exhaust(int padded, int units)
-    {
-        int x = padded % Water.Stride - 1, y = padded / Water.Stride - 1;
-        _gasGrid?.AddGas(x, y, ExhaustSpecies, units / (float)LiquidGrid.Full * MolesPerCellBurned, FlameTemperature);
-    }
-
-    void LightFromHotGas()
-    {
-        var heat = _heat;
-        if (heat == null) return;
-        int w = Water.Width, h = Water.Height;
-        for (int y = 0; y < h; y++)
-            for (int x = 0; x < w; x++)
-            {
-                int i = Water.Index(x, y);
-                if (Water.Fire[i] != 0 || Water.Water[i] == 0 || LiquidGrid.Flammability[Water.Kind[i]] <= 0f) continue;
-                if (heat[y * w + x] >= IgnitionTemperature / LiquidGrid.Flammability[Water.Kind[i]]) Water.Ignite(x, y);
-            }
+        var grid = _gasGrid;
+        if (grid == null) return 0;
+        int stride = Water.Stride, x = airCell % stride - 1, y = airCell / stride - 1;
+        var temps = _temperature;
+        float t = temps != null ? temps[y * Water.Width + x] : 293f;
+        float rate = forced ? most : VentRate[kind] * Math.Min(MaxVentBoost, MathF.Exp(Math.Max(0f, t - 293f) / VentHeat[kind]));
+        int units = (int)rate;
+        _ventCarry[kind] += rate - units;
+        if (_ventCarry[kind] >= 1f) { units++; _ventCarry[kind] -= 1f; }
+        units = Math.Min(units, most);
+        if (units <= 0) return 0;
+        grid.AddGas(x, y, _fuelSpecies, units / (float)LiquidGrid.Full * MolesPerLiquidCell, forced ? Math.Max(t, _heatTarget) : Math.Max(t, 293f));
+        return units;
     }
 
     static int ToUnits(float cells) => (int)Math.Min(int.MaxValue, Math.Ceiling(cells * LiquidGrid.Full));

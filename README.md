@@ -12,11 +12,14 @@ of gas. Regular Sandbox and every other mode are unchanged.
 Tested with Combustor Steam build **26701522** (app 5047230, Unity 6000.3.2f1, game version 1.0),
 MelonLoader **0.7.3** (IL2CPP, net6 runtime), Windows 11.
 
-## New in 1.3.0 (work in progress)
+## New in 1.4.0 (work in progress)
 
-- **Fire**: gasoline lights easily (heat brush, igniters, flames or hot gas) and keeps burning until it
-  runs out of fuel or air; diesel is reluctant to catch; water never burns. Flames spread across the
-  surface and flash through gasoline vapour, and burning releases hot exhaust into the game's gas.
+- **Fuels burn as the game's own gas**: gasoline and diesel evaporate into Combustor's **Fuel** gas, so
+  they burn exactly like fuel in an engine, through the game's own reactions, igniters and flames (no
+  separate liquid fire). As in an engine, the game's combustion needs Oxidizer gas and an igniter or
+  700 K. Hot gas above a pool makes it evaporate much faster, so a fire keeps feeding itself until the
+  liquid is gone or the oxidizer runs out. Gasoline is volatile; diesel barely evaporates until heated.
+  The heat brush boils liquid fuel straight into hot Fuel gas.
 
 ## New in 1.2.0 (work in progress)
 

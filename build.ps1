@@ -6,7 +6,7 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
-$version = "1.3.0"
+$version = "1.4.0"
 
 if (-not (Test-Path (Join-Path $GameDirectory "MelonLoader\Il2CppAssemblies\Assembly-CSharp.dll"))) {
     throw "No MelonLoader game bindings under $GameDirectory. Install MelonLoader, start Combustor once, or pass -GameDirectory."

@@ -470,25 +470,17 @@ Run("Deeper water spouts further from a hole (pressure)", () =>
     Check(deep > shallow + 5, $"jet reach: 4 cells deep {shallow}, 45 cells deep {deep}");
 });
 
-Run("Gasoline catches easily and burns until it runs out of fuel or air", () =>
+Run("Fuel vapour can be handed to the game's gas, exactly accounted", () =>
 {
-    int w = 40, h = 20;
-    var g = new LiquidGrid(w, h) { Evaporation = false };
-    for (int x = 0; x < w; x++) { g.Add(x, 0, F, LiquidGrid.Water1); g.Add(x, 1, F, LiquidGrid.Gasoline); g.Add(x, 2, F / 2, LiquidGrid.Gasoline); }
-    long gas = g.Total(2), water = g.Total(1), all = g.Accounted();
-    Check(g.Ignite(3, 2), "a flame lights gasoline");
-    Check(!g.Ignite(3, 0), "water does not light");
-    int ticks = 0, most = 0;
-    while (ticks < 20000) { g.Step(); int n = g.Burn(_ => true, (_, _) => { }); most = Math.Max(most, n); ticks++; if (n == 0 && ticks > 10) break; }
-    Check(most > w / 2, $"the fire spread across the pool ({most} cells burning at once)");
-    Check(g.LiquidOf(2) == 0 && g.Burned[2] == gas, $"it kept burning until the gasoline was gone ({ticks} ticks)");
-    Check(g.Total(1) == water && g.Accounted() == all, "water untouched; everything accounted for");
-    var sealedOff = new LiquidGrid(w, h) { Evaporation = false };
-    for (int x = 0; x < w; x++) sealedOff.Add(x, 0, F, LiquidGrid.Gasoline);
-    sealedOff.Ignite(5, 0);
-    sealedOff.Step();
-    sealedOff.Burn(_ => false, (_, _) => { });
-    Check(sealedOff.Burn(_ => false, (_, _) => { }) == 0 && sealedOff.LiquidOf(2) == (long)w * F, "without air it goes out");
+    var g = new LiquidGrid(20, 10);
+    long given = 0;
+    g.Vents[LiquidGrid.Gasoline] = true;
+    g.Vent = (kind, cell, air, most, forced) => { int u = Math.Min(most, 500); given += u; return u; };
+    for (int x = 0; x < 20; x++) { g.Add(x, 0, F, LiquidGrid.Water1); g.Add(x, 1, F, LiquidGrid.Gasoline); }
+    long all = g.Accounted();
+    for (int t = 0; t < 400; t++) g.Step();
+    Check(g.Vented[2] == given && given > 0 && g.VaporOf(2) == 0, $"gasoline left as game gas ({given / (double)F:0.00} cells), none as local vapour");
+    Check(g.Accounted() == all, "liquid plus what left as gas is unchanged");
 });
 
 Run("Performance on the default 256 x 160 sandbox grid", () =>
