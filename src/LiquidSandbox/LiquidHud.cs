@@ -10,8 +10,8 @@ namespace LiquidSandbox;
 internal sealed class LiquidHud
 {
     public const string HintText =
-        "Press <b>A</b> to pour water and <b>S</b> to drain it.\n" +
-        "Press <b>W</b> to draw walls; water flows around them.\n" +
+        "Every Sandbox tool and gas works here. Pick Water, Gasoline or Diesel under AMBIENT,\n" +
+        "then <b>A</b> pours it (pick Gas to spray gas again); <b>S</b> drains liquid and gas.\n" +
         "Set gravity under AMBIENT, or press <b>F</b> to turn it.";
 
     public const string ViewText =
@@ -88,6 +88,11 @@ internal sealed class LiquidHud
     {
         var water = _session.Water;
         GUILayout.BeginHorizontal(Gui.None);
+        if (SimGui.Button(_session.SelectedKind == 0 ? "<b>[ Gas ]</b>" : "Gas", hud._button, Gui.RowHeight))
+        {
+            _session.SelectedKind = 0;
+            _session.Input?.SelectTool(Tool.Gas);
+        }
         for (int k = 1; k <= LiquidGrid.KindCount; k++)
         {
             if (SimGui.Button(KindLabels[k, _session.SelectedKind == k ? 1 : 0], hud._button, Gui.RowHeight))
@@ -231,7 +236,7 @@ internal sealed class LiquidHud
 
     static readonly GasSimHud.DockItem[] HiddenDock =
     {
-        GasSimHud.DockItem.Probe, GasSimHud.DockItem.View, GasSimHud.DockItem.Feeds, GasSimHud.DockItem.Ambient,
+        GasSimHud.DockItem.View, GasSimHud.DockItem.Ambient,
         GasSimHud.DockItem.Edges, GasSimHud.DockItem.Experimental, GasSimHud.DockItem.Script, GasSimHud.DockItem.Engine,
         GasSimHud.DockItem.Codex,
     };

@@ -17,7 +17,7 @@ internal sealed unsafe class WaterView
     static readonly Color32[] Light = { default, new(78, 168, 245, 255), new(250, 214, 96, 255), new(204, 146, 62, 255) };
     static readonly Color32[] Deep = { default, new(24, 76, 186, 255), new(196, 136, 28, 255), new(104, 64, 20, 255) };
     const int DepthSteps = 16;
-    const float HazeStrength = 0.25f;
+    const float HazeStrength = 0.18f;
     const MeshUpdateFlags Quiet = MeshUpdateFlags.DontValidateIndices | MeshUpdateFlags.DontResetBoneBounds
         | MeshUpdateFlags.DontNotifyMeshUsers | MeshUpdateFlags.DontRecalculateBounds;
 
@@ -111,7 +111,7 @@ internal sealed unsafe class WaterView
             float share = Math.Min(1f, (float)v / LiquidGrid.Saturation[k]);
             if (share > best) { best = share; kind = k; }
         }
-        if (kind != 0) pixel = Color32.Lerp(pixel, Light[kind], best * HazeStrength);
+        if (kind != 0 && best > 0.35f) pixel = Color32.Lerp(pixel, Light[kind], (best - 0.35f) / 0.65f * HazeStrength);
     }
 
     bool Ensure(GasSimRenderer renderer, LiquidGrid water)

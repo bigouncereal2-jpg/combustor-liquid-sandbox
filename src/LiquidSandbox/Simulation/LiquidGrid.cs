@@ -210,6 +210,25 @@ public sealed unsafe class LiquidGrid
         return t;
     }
 
+    /// <summary>Turns up to <paramref name="units"/> of the liquid in a cell into vapour in the nearest
+    /// empty cell (heat). Returns what boiled.</summary>
+    public int Boil(int x, int y, int units)
+    {
+        if (units <= 0 || !InBounds(x, y)) return 0;
+        int i = Index(x, y);
+        int w = Water[i];
+        if (w == 0) return 0;
+        int air = NearestAir(i);
+        if (air < 0) return 0;
+        int k = Kind[i];
+        int t = Math.Min(units, w);
+        Water[i] = w - t;
+        if (Water[i] == 0) Empty(i);
+        Vapor[k][air] += t;
+        _vaporPresent[k] = true;
+        return t;
+    }
+
     void Empty(int i)
     {
         Kind[i] = 0;

@@ -32,10 +32,8 @@ internal sealed class TextSwaps
 
     static readonly (string key, string text)[] Texts =
     {
-        ("Gas", "Liquid"),
-        ("Vacuum", "Drain"),
-        ("dock.tool.gas", "Pour the liquid picked under AMBIENT: water, gasoline or diesel. The mouse wheel sets how fast."),
-        ("dock.tool.vacuum", "Drain liquid from under the brush. The mouse wheel sets how fast."),
+        ("dock.tool.gas", "Spray the selected gas, or pour the liquid picked under AMBIENT (water, gasoline or diesel). The mouse wheel sets how fast."),
+        ("dock.tool.vacuum", "Suck out gas and drain liquid under the brush. The mouse wheel sets how fast."),
     };
 
     public void Apply()

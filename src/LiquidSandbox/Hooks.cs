@@ -41,21 +41,14 @@ internal static class Hooks
 
         Patch(typeof(GasSimRenderer), nameof(GasSimRenderer.DrawGenerators), nameof(DrawGeneratorsPrefix), null);
 
-        Patch(typeof(GasSimInput), nameof(GasSimInput.ToolAllowed), nameof(ToolAllowedPrefix), null);
-        Patch(typeof(GasSimInput), nameof(GasSimInput.CycleView), nameof(InputOnlyOutsideLiquid), null);
-        Patch(typeof(GasSimInput), nameof(GasSimInput.ToggleCodex), nameof(InputOnlyOutsideLiquid), null);
         Patch(typeof(GasSimInput), nameof(GasSimInput.HandleKeys), null, nameof(HandleKeysPostfix));
         Patch(typeof(GasSimInput), nameof(GasSimInput.OnGridReplaced), null, nameof(GridReplacedPostfix));
 
-        Patch(typeof(GasSimHud), nameof(GasSimHud.DrawTools), nameof(DrawToolsPrefix), nameof(DrawToolsPostfix));
-        Patch(typeof(GasSimHud), nameof(GasSimHud.DrawWindPanel), nameof(WindPanelPrefix), null);
-        Patch(typeof(GasSimHud), nameof(GasSimHud.DrawBackgroundPanel), nameof(BackgroundPanelPrefix), null);
-        Patch(typeof(GasSimHud), nameof(GasSimHud.ViewDescription), nameof(ViewDescriptionPrefix), null);
+        Patch(typeof(GasSimHud), nameof(GasSimHud.DrawWindPanel), null, nameof(WindPanelPostfix));
+        Patch(typeof(GasSimHud), nameof(GasSimHud.DrawBackgroundPanel), null, nameof(BackgroundPanelPostfix));
+        Patch(typeof(GasSimInput), nameof(GasSimInput.StampOne), nameof(StampPrefix), nameof(StampPostfix));
         Patch(typeof(GasSimHud), nameof(GasSimHud.DrawInspector), nameof(InspectorPrefix), null);
-        Patch(typeof(GasSimHud), nameof(GasSimHud.BuildDockItems), null, nameof(DockItemsPostfix));
 
-        Patch(typeof(GasSimulation), nameof(GasSimulation.ToggleVacuum), nameof(SimOnlyOutsideLiquid), null);
-        Patch(typeof(GasSimulation), nameof(GasSimulation.SetBackgroundGas), nameof(SimOnlyOutsideLiquid), null);
         Patch(typeof(GasSimulation), nameof(GasSimulation.ResetGas), null, nameof(ResetGasPostfix));
         Patch(typeof(GasSimulation), nameof(GasSimulation.ResetAll), null, nameof(ResetAllPostfix));
         Patch(typeof(GasSimulation), nameof(GasSimulation.SaveTo), null, nameof(SaveToPostfix));
@@ -113,30 +106,37 @@ internal static class Hooks
         return s != null && s.Owns(grid) ? s : null;
     }
 
+    static bool _brush;
+
+    // Liquids tick first, then the game's own step runs as usual for gases and parts.
     static bool StepPrefix(GasGrid __instance)
     {
-        var s = LiquidSession.Current;
-        if (s == null) return true;
-        return !s.TryTick(__instance);
+        LiquidSession.Current?.TryTick(__instance);
+        return true;
     }
+
+    static void StampPrefix() => _brush = true;
+    static void StampPostfix() => _brush = false;
 
     static bool AddGasPrefix(GasGrid __instance, int x, int y, float amount)
     {
         var s = For(__instance);
-        if (s == null) return true;
+        if (s == null || !_brush || s.SelectedKind == 0) return true;
         s.Pour(x, y, amount);
         return false;
     }
 
     static bool RemoveGasPrefix(GasGrid __instance, int x, int y, float fraction)
     {
-        var s = For(__instance);
-        if (s == null) return true;
-        s.Drain(x, y, fraction);
-        return false;
+        For(__instance)?.Drain(x, y, fraction);
+        return true;
     }
 
-    static bool AddHeatPrefix(GasGrid __instance) => For(__instance) == null;
+    static bool AddHeatPrefix(GasGrid __instance, int x, int y)
+    {
+        For(__instance)?.Heat(x, y);
+        return true;
+    }
 
     static void DrawGeneratorsPrefix(GasGrid grid, Il2CppStructArray<Color32> pixels)
     {
@@ -230,23 +230,20 @@ internal static class Hooks
 
     static void DrawToolsPostfix() => _inDrawTools = false;
 
-    static bool WindPanelPrefix(GasSimHud __instance)
+    static void WindPanelPostfix(GasSimHud __instance)
     {
         var s = LiquidSession.Current;
-        if (s == null || !s.Owns(__instance)) return true;
-        _inDrawTools = false;
+        if (s == null || !s.Owns(__instance)) return;
         try { s.Hud.DrawGravityPanel(__instance); }
         catch (Exception error) { s.Fail("gravity panel", error); }
-        return false;
     }
 
-    static bool BackgroundPanelPrefix(GasSimHud __instance)
+    static void BackgroundPanelPostfix(GasSimHud __instance)
     {
         var s = LiquidSession.Current;
-        if (s == null || !s.Owns(__instance)) return true;
+        if (s == null || !s.Owns(__instance)) return;
         try { s.Hud.DrawWaterPanel(__instance); }
-        catch (Exception error) { s.Fail("water panel", error); }
-        return false;
+        catch (Exception error) { s.Fail("liquid panel", error); }
     }
 
     static bool ViewDescriptionPrefix(GasSimHud __instance, ref string __result)
@@ -260,7 +257,7 @@ internal static class Hooks
     static bool InspectorPrefix(GasSimHud __instance)
     {
         var s = LiquidSession.Current;
-        if (s == null || !s.Owns(__instance)) return true;
+        if (s == null || !s.Owns(__instance) || !s.HoversLiquid) return true;
         try { s.Hud.DrawInspector(__instance); }
         catch (Exception error) { s.Fail("inspector", error); }
         return false;

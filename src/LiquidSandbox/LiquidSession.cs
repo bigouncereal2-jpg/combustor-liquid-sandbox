@@ -86,18 +86,14 @@ public sealed class LiquidSession
     public bool Owns(GasSimInput input) => input != null && input.Pointer == _input;
     public bool Owns(GasSimHud hud) => hud != null && hud.Pointer == _hud;
 
-    internal static bool ToolAllowed(Tool t) => t is Tool.Wall or Tool.Gas or Tool.Vacuum or Tool.Valve;
+    /// <summary>Every sandbox tool is available. Injectors pour the picked liquid, holes drain it,
+    /// heat and igniters boil it into vapour, and walls, valves and pistons move it aside.</summary>
+    internal static bool ToolAllowed(Tool t) => true;
 
     void Configure()
     {
         Sim.ExampleHint = LiquidHud.HintText;
-        SealAndEmpty();
-        if (Input != null)
-        {
-            Input.showCodex = false;
-            Input.SelectTool(Tool.Wall);
-        }
-        if (Renderer != null) Renderer.view = ViewMode.Species;
+        Input?.SelectTool(Tool.Wall);
         _texts.Apply();
     }
 
@@ -131,10 +127,6 @@ public sealed class LiquidSession
             End();
             return;
         }
-        var settings = Sim.settings;
-        if (settings != null && (settings.openBoundaries || !settings.vacuumAmbient || settings.windOn)) SealAndEmpty();
-        if (Renderer != null && Renderer.view != ViewMode.Species) Renderer.view = ViewMode.Species;
-        if (Input != null && Input.showCodex) Input.showCodex = false;
     }
 
     /// <summary>Runs one fixed tick of water instead of the gas solver. Returns false for grids
@@ -219,6 +211,12 @@ public sealed class LiquidSession
         Water.Remove(x, y, ToUnits(share * CellsPerDrain));
     }
 
+    /// <summary>True when the cursor is over a cell holding liquid (the inspector then describes it).</summary>
+    internal bool HoversLiquid => Input != null && Input.HoverValid && Water.Get(Input.HoverX, Input.HoverY) > 0;
+
+    /// <summary>Heat boils the liquid under it into vapour (the heat brush and igniters).</summary>
+    internal void Heat(int x, int y) => Water.Boil(x, y, LiquidGrid.Full / 16);
+
     static int ToUnits(float cells) => (int)Math.Min(int.MaxValue, Math.Ceiling(cells * LiquidGrid.Full));
 
     public void ClearWater() => Water.Clear();
@@ -264,7 +262,6 @@ public sealed class LiquidSession
 
     internal void Loaded(string directory, string name)
     {
-        SealAndEmpty();
         var grid = Sim.Grid;
         if (grid == null) return;
         _pendingResize = false;
